@@ -220,6 +220,7 @@ pub enum WafProtection {
     Wbaas,
     Kasada,
     CloudflareTurnstile,
+    Variti,
     None,
 }
 
@@ -229,6 +230,7 @@ impl fmt::Display for WafProtection {
             Self::Wbaas => write!(f, "Wbaas (Wildberries)"),
             Self::Kasada => write!(f, "Kasada / Qrator Anti-Bot"),
             Self::CloudflareTurnstile => write!(f, "Cloudflare Turnstile"),
+            Self::Variti => write!(f, "Variti (Ozon Anti-Bot)"),
             Self::None => write!(f, "None"),
         }
     }

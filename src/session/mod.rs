@@ -1,5 +1,6 @@
 pub mod bun_solver;
 pub mod cookies;
+pub mod native_solver;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -8,6 +9,7 @@ use tracing::info;
 use crate::domain::ScraperError;
 pub use bun_solver::BunSolver;
 pub use cookies::{CookieStore, SessionData};
+pub use native_solver::NativeCdpSolver;
 
 /// Central coordinator for marketplace session credentials and lazy token refreshing.
 #[derive(Debug, Clone)]

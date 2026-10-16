@@ -70,14 +70,16 @@ impl BunSolver {
                 }
             }
         }
-        // NixOS config path (accessible in sandboxed-dev-tools)
-        let nixos_script = Path::new(
-            "/home/user/nixos-config/modules/ai/mcp/ru-marketplace-mcp/scripts/harvest_tokens.ts",
-        );
-        if nixos_script.exists() {
-            return nixos_script.to_path_buf();
+        // XDG data path fallback (clean separation of concerns, accessible in sandboxed-dev-tools)
+        let xdg_script1 =
+            Path::new("/home/user/.local/share/ru-marketplace-mcp/scripts/harvest_tokens.ts");
+        if xdg_script1.exists() {
+            return xdg_script1.to_path_buf();
         }
-
+        let xdg_script2 = Path::new("/home/user/.local/share/ru-marketplace-mcp/harvest_tokens.ts");
+        if xdg_script2.exists() {
+            return xdg_script2.to_path_buf();
+        }
         // Known repo installation path fallback
         let repo_script =
             Path::new("/home/user/projects/ru-marketplace-mcp-rs/scripts/harvest_tokens.ts");
