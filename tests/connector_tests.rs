@@ -215,3 +215,53 @@ fn test_citilink_parse_catalog_data() {
     assert_eq!(offer.currency, Currency::Rub);
     assert_eq!(offer.seller, Some("Citilink".to_string()));
 }
+
+#[test]
+fn test_ozon_parse_card_json() {
+    let mock_json = r#"{
+        "widgetStates": {
+            "webProductHeading-123-default-1": {
+                "title": "Процессор Intel Core i5-14600K LGA 1700 OEM"
+            },
+            "webPrice-456-default-1": {
+                "isAvailable": true,
+                "price": "27 999 ₽",
+                "cardPrice": "27 719 ₽",
+                "originalPrice": "35 000 ₽"
+            },
+            "webReviewProductScore-789-default-1": {
+                "totalScore": 4.9,
+                "reviewsCount": 61
+            },
+            "webBrand-101-default-1": {
+                "content": {
+                    "title": {
+                        "text": [
+                            {
+                                "type": "link",
+                                "content": "Intel"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let offer = OzonConnector::parse_card_json(mock_json, "3087570418").unwrap();
+    assert_eq!(offer.marketplace, Marketplace::Ozon);
+    assert_eq!(offer.title, "Процессор Intel Core i5-14600K LGA 1700 OEM");
+    assert_eq!(offer.product_id, Some("3087570418".to_string()));
+    assert_eq!(
+        offer.price_tier,
+        PriceTier::MarketplaceCard {
+            price: 27719,
+            card: CardType::OzonCard
+        }
+    );
+    assert_eq!(offer.original_price, Some(35000));
+    assert_eq!(offer.rating, Some(4.9));
+    assert_eq!(offer.review_count, Some(61));
+    assert_eq!(offer.seller, Some("Intel".to_string()));
+    assert_eq!(offer.stock, StockStatus::InStock(1));
+}

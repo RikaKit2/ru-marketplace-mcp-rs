@@ -170,6 +170,21 @@ impl McpServer {
                             "description": "Maximum offers to take per marketplace (default 5)",
                             "minimum": 1,
                             "maximum": 20
+                        },
+                        "min_price": {
+                            "type": "integer",
+                            "description": "Minimum price in rubles",
+                            "minimum": 0
+                        },
+                        "max_price": {
+                            "type": "integer",
+                            "description": "Maximum price in rubles",
+                            "minimum": 0
+                        },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
                         }
                     },
                     "required": ["query"]
@@ -190,6 +205,21 @@ impl McpServer {
                             "description": "Maximum offers to return (default 10)",
                             "minimum": 1,
                             "maximum": 50
+                        },
+                        "min_price": {
+                            "type": "integer",
+                            "description": "Minimum price in rubles",
+                            "minimum": 0
+                        },
+                        "max_price": {
+                            "type": "integer",
+                            "description": "Maximum price in rubles",
+                            "minimum": 0
+                        },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
                         }
                     },
                     "required": ["query"]
@@ -210,6 +240,21 @@ impl McpServer {
                             "description": "Maximum offers to return (default 10)",
                             "minimum": 1,
                             "maximum": 50
+                        },
+                        "min_price": {
+                            "type": "integer",
+                            "description": "Minimum price in rubles",
+                            "minimum": 0
+                        },
+                        "max_price": {
+                            "type": "integer",
+                            "description": "Maximum price in rubles",
+                            "minimum": 0
+                        },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
                         }
                     },
                     "required": ["query"]
@@ -230,6 +275,21 @@ impl McpServer {
                             "description": "Maximum offers to return (default 10)",
                             "minimum": 1,
                             "maximum": 50
+                        },
+                        "min_price": {
+                            "type": "integer",
+                            "description": "Minimum price in rubles",
+                            "minimum": 0
+                        },
+                        "max_price": {
+                            "type": "integer",
+                            "description": "Maximum price in rubles",
+                            "minimum": 0
+                        },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
                         }
                     },
                     "required": ["query"]
@@ -250,6 +310,21 @@ impl McpServer {
                             "description": "Maximum offers to return (default 10)",
                             "minimum": 1,
                             "maximum": 50
+                        },
+                        "min_price": {
+                            "type": "integer",
+                            "description": "Minimum price in rubles",
+                            "minimum": 0
+                        },
+                        "max_price": {
+                            "type": "integer",
+                            "description": "Maximum price in rubles",
+                            "minimum": 0
+                        },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
                         }
                     },
                     "required": ["query"]
@@ -304,6 +379,18 @@ impl McpServer {
             })
             .unwrap_or_default();
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+        let min_price = args.get("min_price").and_then(|v| v.as_u64());
+        let max_price = args.get("max_price").and_then(|v| v.as_u64());
+        let sort = args
+            .get("sort")
+            .and_then(|v| v.as_str())
+            .and_then(|s| std::str::FromStr::from_str(s).ok());
+
+        let filters = crate::domain::SearchFilterOptions {
+            min_price,
+            max_price,
+            sort,
+        };
 
         match name {
             "ozon_card" => {
@@ -334,7 +421,10 @@ impl McpServer {
                 if query.trim().is_empty() {
                     return McpCallResult::error("Argument 'query' must not be empty");
                 }
-                let result = self.aggregator.compare_prices(query, limit, None).await;
+                let result = self
+                    .aggregator
+                    .compare_prices(query, limit, None, Some(&filters))
+                    .await;
                 match serde_json::to_string_pretty(&result) {
                     Ok(text) => McpCallResult::text(text),
                     Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
@@ -344,7 +434,7 @@ impl McpServer {
                 if query.trim().is_empty() {
                     return McpCallResult::error("Argument 'query' must not be empty");
                 }
-                match self.wb.search(query, limit.max(10)).await {
+                match self.wb.search(query, limit.max(10), &filters).await {
                     Ok(offers) => match serde_json::to_string_pretty(&offers) {
                         Ok(text) => McpCallResult::text(text),
                         Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
@@ -356,7 +446,7 @@ impl McpServer {
                 if query.trim().is_empty() {
                     return McpCallResult::error("Argument 'query' must not be empty");
                 }
-                match self.ozon.search(query, limit.max(10)).await {
+                match self.ozon.search(query, limit.max(10), &filters).await {
                     Ok(offers) => match serde_json::to_string_pretty(&offers) {
                         Ok(text) => McpCallResult::text(text),
                         Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
@@ -368,7 +458,7 @@ impl McpServer {
                 if query.trim().is_empty() {
                     return McpCallResult::error("Argument 'query' must not be empty");
                 }
-                match self.dns.search(query, limit.max(10)).await {
+                match self.dns.search(query, limit.max(10), &filters).await {
                     Ok(offers) => match serde_json::to_string_pretty(&offers) {
                         Ok(text) => McpCallResult::text(text),
                         Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
@@ -380,7 +470,7 @@ impl McpServer {
                 if query.trim().is_empty() {
                     return McpCallResult::error("Argument 'query' must not be empty");
                 }
-                match self.citilink.search(query, limit.max(10)).await {
+                match self.citilink.search(query, limit.max(10), &filters).await {
                     Ok(offers) => match serde_json::to_string_pretty(&offers) {
                         Ok(text) => McpCallResult::text(text),
                         Err(e) => McpCallResult::error(format!("Serialization error: {e}")),

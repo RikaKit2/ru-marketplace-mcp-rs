@@ -156,6 +156,7 @@ fn test_mcp_tool_request_serde() {
     let compare = McpToolRequest::ComparePrices {
         query: "macbook air m2".to_string(),
         limit: Some(10),
+        filters: None,
     };
 
     let json = serde_json::to_string(&compare).unwrap();
@@ -188,4 +189,38 @@ fn test_json_rpc_messages() {
     let err_resp = JsonRpcResponse::error(Some(serde_json::json!(1)), -32601, "Method not found");
     let err_str = serde_json::to_string(&err_resp).unwrap();
     assert!(err_str.contains("Method not found"));
+}
+
+#[test]
+fn test_search_filter_options_serde() {
+    use ru_marketplace_mcp::domain::{SearchFilterOptions, SortOrder};
+    use std::str::FromStr;
+
+    assert_eq!(
+        SortOrder::from_str("price_asc").unwrap(),
+        SortOrder::PriceAsc
+    );
+    assert_eq!(
+        SortOrder::from_str("price_desc").unwrap(),
+        SortOrder::PriceDesc
+    );
+    assert_eq!(SortOrder::from_str("rating").unwrap(), SortOrder::Rating);
+    assert_eq!(SortOrder::from_str("reviews").unwrap(), SortOrder::Reviews);
+    assert_eq!(
+        SortOrder::from_str("discount").unwrap(),
+        SortOrder::Discount
+    );
+
+    let opts = SearchFilterOptions {
+        min_price: Some(10000),
+        max_price: Some(25000),
+        sort: Some(SortOrder::PriceAsc),
+    };
+
+    let json = serde_json::to_string(&opts).unwrap();
+    assert!(json.contains("10000"));
+    assert!(json.contains("price_asc"));
+
+    let de: SearchFilterOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(opts, de);
 }

@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         };
 
         let result = aggregator
-            .compare_prices(&query, cli.limit, filter_marketplace.as_deref())
+            .compare_prices(&query, cli.limit, filter_marketplace.as_deref(), None)
             .await;
 
         println!("{}", serde_json::to_string_pretty(&result)?);

@@ -5,7 +5,8 @@ use tracing::info;
 
 use super::MarketplaceConnector;
 use crate::domain::{
-    CardType, Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus,
+    CardType, Currency, Marketplace, PriceTier, ProductOffer, ScraperError, SearchFilterOptions,
+    SortOrder, StockStatus,
 };
 use crate::session::SessionManager;
 use crate::transport::apply_browser_fingerprint;
@@ -394,13 +395,44 @@ impl MarketplaceConnector for OzonConnector {
         Marketplace::Ozon
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<ProductOffer>, ScraperError> {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilterOptions,
+    ) -> Result<Vec<ProductOffer>, ScraperError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
 
-        let url_param = format!("/search/?text={trimmed}");
+        let mut url_param = format!("/search/?text={trimmed}");
+
+        // Append price filters if specified
+        match (filters.min_price, filters.max_price) {
+            (Some(min), Some(max)) => {
+                url_param.push_str(&format!("&currency_price={min}.000%3B{max}.000"));
+            }
+            (Some(min), None) => {
+                url_param.push_str(&format!("&currency_price={min}.000%3B"));
+            }
+            (None, Some(max)) => {
+                url_param.push_str(&format!("&currency_price=%3B{max}.000"));
+            }
+            (None, None) => {}
+        }
+
+        // Append sorting if specified
+        if let Some(sort) = filters.sort {
+            match sort {
+                SortOrder::PriceAsc => url_param.push_str("&sorting=price"),
+                SortOrder::PriceDesc => url_param.push_str("&sorting=price_desc"),
+                SortOrder::Rating => url_param.push_str("&sorting=rating"),
+                SortOrder::Discount => url_param.push_str("&sorting=discount"),
+                SortOrder::Reviews | SortOrder::Popular => {}
+            }
+        }
+
         let mut session = self.session_manager.get_session("ozon").await;
 
         if session.is_none()
@@ -439,7 +471,22 @@ impl MarketplaceConnector for OzonConnector {
             }
         };
 
-        Self::parse_composer_json(&body, limit)
+        let mut offers = Self::parse_composer_json(&body, limit)?;
+
+        // In-memory sort by review count if requested
+        if filters.sort == Some(SortOrder::Reviews) {
+            offers.sort_by_key(|b| std::cmp::Reverse(b.review_count.unwrap_or(0)));
+        }
+
+        // Downstream price boundary safety check
+        if let Some(min) = filters.min_price {
+            offers.retain(|o| o.price_tier.price() >= min);
+        }
+        if let Some(max) = filters.max_price {
+            offers.retain(|o| o.price_tier.price() <= max);
+        }
+
+        Ok(offers)
     }
 
     async fn get_card(&self, item_id: &str) -> Result<ProductOffer, ScraperError> {

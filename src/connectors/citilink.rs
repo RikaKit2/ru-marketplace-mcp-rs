@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use super::MarketplaceConnector;
 use crate::domain::{
-    Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus, WafProtection,
+    Currency, Marketplace, PriceTier, ProductOffer, ScraperError, SearchFilterOptions, SortOrder,
+    StockStatus, WafProtection,
 };
 
 const CITILINK_SEARCH_URL: &str = "https://www.citilink.ru/search/";
@@ -212,12 +213,16 @@ impl MarketplaceConnector for CitilinkConnector {
         Marketplace::Citilink
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<ProductOffer>, ScraperError> {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilterOptions,
+    ) -> Result<Vec<ProductOffer>, ScraperError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
-
         let response = self
             .client
             .get(CITILINK_SEARCH_URL)
@@ -249,7 +254,35 @@ impl MarketplaceConnector for CitilinkConnector {
             });
         }
 
-        Self::parse_catalog_data(&body, limit)
+        let mut offers = Self::parse_catalog_data(&body, limit)?;
+
+        if let Some(sort) = filters.sort {
+            match sort {
+                SortOrder::PriceAsc => offers.sort_by_key(|o| o.price_tier.price()),
+                SortOrder::PriceDesc => {
+                    offers.sort_by_key(|b| std::cmp::Reverse(b.price_tier.price()));
+                }
+                SortOrder::Rating => offers.sort_by(|a, b| {
+                    b.rating
+                        .unwrap_or(0.0)
+                        .partial_cmp(&a.rating.unwrap_or(0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+                SortOrder::Reviews => {
+                    offers.sort_by_key(|b| std::cmp::Reverse(b.review_count.unwrap_or(0)));
+                }
+                SortOrder::Discount | SortOrder::Popular => {}
+            }
+        }
+
+        if let Some(min) = filters.min_price {
+            offers.retain(|o| o.price_tier.price() >= min);
+        }
+        if let Some(max) = filters.max_price {
+            offers.retain(|o| o.price_tier.price() <= max);
+        }
+
+        Ok(offers)
     }
 
     async fn get_card(&self, item_id: &str) -> Result<ProductOffer, ScraperError> {

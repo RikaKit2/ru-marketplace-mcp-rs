@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use ru_marketplace_mcp::connectors::MarketplaceConnector;
 use ru_marketplace_mcp::domain::{
-    Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus, WafProtection,
+    Currency, Marketplace, PriceTier, ProductOffer, ScraperError, SearchFilterOptions, SortOrder,
+    StockStatus, WafProtection,
 };
 use ru_marketplace_mcp::services::AggregatorService;
 
@@ -19,7 +20,12 @@ impl MarketplaceConnector for MockConnector {
         self.marketplace
     }
 
-    async fn search(&self, _query: &str, _limit: usize) -> Result<Vec<ProductOffer>, ScraperError> {
+    async fn search(
+        &self,
+        _query: &str,
+        _limit: usize,
+        _filters: &SearchFilterOptions,
+    ) -> Result<Vec<ProductOffer>, ScraperError> {
         if self.fail {
             return Err(ScraperError::WafBlocked {
                 waf: WafProtection::Kasada,
@@ -74,7 +80,9 @@ async fn test_aggregator_ranking_and_spread() {
     });
 
     let aggregator = AggregatorService::new(vec![wb, ozon, dns]);
-    let result = aggregator.compare_prices("test product", 5, None).await;
+    let result = aggregator
+        .compare_prices("test product", 5, None, None)
+        .await;
 
     assert_eq!(result.total_offers, 3);
     assert!(result.complete);
@@ -112,7 +120,9 @@ async fn test_aggregator_partial_results_on_failure() {
     });
 
     let aggregator = AggregatorService::new(vec![wb, failing_ozon]);
-    let result = aggregator.compare_prices("test product", 5, None).await;
+    let result = aggregator
+        .compare_prices("test product", 5, None, None)
+        .await;
 
     // Partial results: WB succeeded, Ozon failed
     assert_eq!(result.total_offers, 1);
@@ -146,10 +156,45 @@ async fn test_aggregator_filter_sources() {
     let aggregator = AggregatorService::new(vec![wb, ozon]);
     let filter = [Marketplace::Wildberries];
     let result = aggregator
-        .compare_prices("test product", 5, Some(&filter))
+        .compare_prices("test product", 5, Some(&filter), None)
         .await;
 
     assert_eq!(result.total_offers, 1);
     assert_eq!(result.sources_queried, vec![Marketplace::Wildberries]);
     assert_eq!(result.offers[0].marketplace, Marketplace::Wildberries);
+}
+
+#[tokio::test]
+async fn test_aggregator_with_price_filter_and_sorting() {
+    let wb = Arc::new(MockConnector {
+        marketplace: Marketplace::Wildberries,
+        offers: vec![make_offer(Marketplace::Wildberries, "Offer B (WB)", 1500)],
+        fail: false,
+    });
+    let ozon = Arc::new(MockConnector {
+        marketplace: Marketplace::Ozon,
+        offers: vec![make_offer(Marketplace::Ozon, "Offer A (Ozon)", 1000)],
+        fail: false,
+    });
+    let dns = Arc::new(MockConnector {
+        marketplace: Marketplace::Dns,
+        offers: vec![make_offer(Marketplace::Dns, "Offer C (DNS)", 2000)],
+        fail: false,
+    });
+
+    let aggregator = AggregatorService::new(vec![wb, ozon, dns]);
+    let filters = SearchFilterOptions {
+        min_price: Some(1200),
+        max_price: Some(2500),
+        sort: Some(SortOrder::PriceDesc),
+    };
+
+    let result = aggregator
+        .compare_prices("test product", 5, None, Some(&filters))
+        .await;
+
+    // 1000 is filtered out (< 1200), remaining 1500 and 2000, sorted descending: 2000, 1500
+    assert_eq!(result.total_offers, 2);
+    assert_eq!(result.offers[0].price_tier.price(), 2000);
+    assert_eq!(result.offers[1].price_tier.price(), 1500);
 }

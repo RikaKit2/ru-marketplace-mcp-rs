@@ -3,6 +3,45 @@ use serde_json::Value;
 
 use super::marketplaces::Marketplace;
 
+/// Sorting criteria for marketplace search results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOrder {
+    Popular,
+    PriceAsc,
+    PriceDesc,
+    Rating,
+    Reviews,
+    Discount,
+}
+
+impl std::str::FromStr for SortOrder {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "popular" => Ok(Self::Popular),
+            "price_asc" | "price" | "priceup" | "cheap" => Ok(Self::PriceAsc),
+            "price_desc" | "pricedown" | "expensive" => Ok(Self::PriceDesc),
+            "rating" | "rate" => Ok(Self::Rating),
+            "reviews" | "review_count" | "feedback" => Ok(Self::Reviews),
+            "discount" | "benefit" => Ok(Self::Discount),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Filter and sorting parameters applied to catalog searches.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchFilterOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_price: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<SortOrder>,
+}
+
 /// High-level MCP tool request variants.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tool", content = "params", rename_all = "snake_case")]
@@ -11,12 +50,16 @@ pub enum McpToolRequest {
         query: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filters: Option<SearchFilterOptions>,
     },
     Search {
         marketplace: Marketplace,
         query: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filters: Option<SearchFilterOptions>,
     },
     GetCard {
         marketplace: Marketplace,

@@ -127,3 +127,43 @@ async fn test_mcp_unknown_method() {
     let err = resp.error.expect("Expected error");
     assert_eq!(err.code, -32601);
 }
+
+#[tokio::test]
+async fn test_mcp_tools_list_schema_filters() {
+    let server = McpServer::new();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(6)),
+        method: "tools/list".to_string(),
+        params: None,
+    };
+
+    let resp = server.handle_request(req).await.expect("Expected response");
+    let result = resp.result.expect("Expected result");
+    let tools = result.get("tools").unwrap().as_array().unwrap();
+
+    let ozon_search = tools
+        .iter()
+        .find(|t| t.get("name").unwrap().as_str().unwrap() == "ozon_search")
+        .unwrap();
+
+    let props = ozon_search
+        .get("inputSchema")
+        .unwrap()
+        .get("properties")
+        .unwrap();
+    assert!(props.get("min_price").is_some());
+    assert!(props.get("max_price").is_some());
+    assert!(props.get("sort").is_some());
+
+    let sort_enum = props
+        .get("sort")
+        .unwrap()
+        .get("enum")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(sort_enum.contains(&json!("price_asc")));
+    assert!(sort_enum.contains(&json!("reviews")));
+}

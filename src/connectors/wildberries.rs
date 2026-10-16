@@ -5,7 +5,8 @@ use tracing::{info, warn};
 
 use super::MarketplaceConnector;
 use crate::domain::{
-    Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus, WafProtection,
+    Currency, Marketplace, PriceTier, ProductOffer, ScraperError, SearchFilterOptions, SortOrder,
+    StockStatus, WafProtection,
 };
 use crate::session::SessionManager;
 use crate::transport::apply_browser_fingerprint;
@@ -186,25 +187,58 @@ impl MarketplaceConnector for WildberriesConnector {
         Marketplace::Wildberries
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<ProductOffer>, ScraperError> {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilterOptions,
+    ) -> Result<Vec<ProductOffer>, ScraperError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
 
+        let mut query_params: Vec<(&str, String)> = vec![
+            ("appType", "1".to_string()),
+            ("curr", "rub".to_string()),
+            ("dest", self.dest.clone()),
+            ("locale", "ru".to_string()),
+            ("query", trimmed.to_string()),
+            ("resultset", "catalog".to_string()),
+            ("page", "1".to_string()),
+            ("spp", "30".to_string()),
+        ];
+
+        // Append price filters (priceU in kopecks)
+        match (filters.min_price, filters.max_price) {
+            (Some(min), Some(max)) => {
+                query_params.push(("priceU", format!("{};{}", min * 100, max * 100)));
+            }
+            (Some(min), None) => {
+                query_params.push(("priceU", format!("{};", min * 100)));
+            }
+            (None, Some(max)) => {
+                query_params.push(("priceU", format!(";{}", max * 100)));
+            }
+            (None, None) => {}
+        }
+
+        // Append sorting
+        if let Some(sort) = filters.sort {
+            match sort {
+                SortOrder::PriceAsc => query_params.push(("sort", "priceup".to_string())),
+                SortOrder::PriceDesc => query_params.push(("sort", "pricedown".to_string())),
+                SortOrder::Rating => query_params.push(("sort", "rate".to_string())),
+                SortOrder::Discount => query_params.push(("sort", "benefit".to_string())),
+                SortOrder::Popular => query_params.push(("sort", "popular".to_string())),
+                SortOrder::Reviews => {}
+            }
+        }
+
         let mut session = self.session_manager.get_session("wildberries").await;
 
         let send_search = |sess: Option<&crate::session::SessionData>| {
-            let req = self.client.get(WB_SEARCH_URL).query(&[
-                ("appType", "1"),
-                ("curr", "rub"),
-                ("dest", &self.dest),
-                ("locale", "ru"),
-                ("query", trimmed),
-                ("resultset", "catalog"),
-                ("page", "1"),
-                ("spp", "30"),
-            ]);
+            let req = self.client.get(WB_SEARCH_URL).query(&query_params);
             apply_browser_fingerprint(req, sess)
         };
 
@@ -260,7 +294,20 @@ impl MarketplaceConnector for WildberriesConnector {
             });
         }
 
-        Self::parse_products_json(&body, limit)
+        let mut offers = Self::parse_products_json(&body, limit)?;
+
+        if filters.sort == Some(SortOrder::Reviews) {
+            offers.sort_by_key(|b| std::cmp::Reverse(b.review_count.unwrap_or(0)));
+        }
+
+        if let Some(min) = filters.min_price {
+            offers.retain(|o| o.price_tier.price() >= min);
+        }
+        if let Some(max) = filters.max_price {
+            offers.retain(|o| o.price_tier.price() <= max);
+        }
+
+        Ok(offers)
     }
 
     async fn get_card(&self, item_id: &str) -> Result<ProductOffer, ScraperError> {
