@@ -18,6 +18,77 @@ import puppeteer from "puppeteer-core";
 
 const PROFILE_DIR = "/tmp/ozon-harvester-profile";
 
+const CACHE_FILE = "/home/user/.cache/ru-marketplace-mcp/cookies.json";
+
+function ensureXvfb(): string {
+  const display = ":99";
+  const socketPath = "/tmp/.X11-unix/X99";
+  const lockPath = "/tmp/.X99-lock";
+
+  if (fs.existsSync(socketPath)) {
+    return display;
+  }
+
+  try {
+    if (fs.existsSync(lockPath) && !fs.existsSync(socketPath)) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {}
+
+  const candidates = [
+    process.env.XVFB_BIN,
+    "/nix/store/82c9jys35vg5lj4ixal59pdbfsl1ln0g-xorg-server-21.1.24/bin/Xvfb",
+    "/run/current-system/sw/bin/Xvfb",
+    "Xvfb",
+  ];
+  const xvfbBin = candidates.find((c) => c && fs.existsSync(c)) || "Xvfb";
+
+  const proc = Bun.spawn(
+    [xvfbBin, display, "-screen", "0", "1366x900x24", "-ac", "-nolisten", "tcp"],
+    {
+      detached: true,
+      stdio: ["ignore", "ignore", "ignore"],
+    }
+  );
+  proc.unref();
+
+  for (let i = 0; i < 30; i++) {
+    if (fs.existsSync(socketPath)) return display;
+    const start = Date.now();
+    while (Date.now() - start < 50) {}
+  }
+
+  return display;
+}
+
+function loadCachedSession(marketplace: string): HarvestedSession | null {
+  try {
+    if (!fs.existsSync(CACHE_FILE)) return null;
+    const all = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+    const sess = all[marketplace.toLowerCase()];
+    if (!sess) return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (sess.expires_at && sess.expires_at <= now + 60) return null;
+    return sess;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedSession(marketplace: string, session: HarvestedSession): void {
+  try {
+    fs.mkdirSync("/home/user/.cache/ru-marketplace-mcp", { recursive: true });
+    let all: Record<string, HarvestedSession> = {};
+    if (fs.existsSync(CACHE_FILE)) {
+      try {
+        all = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+      } catch {}
+    }
+    all[marketplace.toLowerCase()] = session;
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(all, null, 2));
+  } catch {}
+}
+
 function clearStaleProfileLock(dir: string): void {
   for (const lock of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
     try {
@@ -232,14 +303,20 @@ async function harvestOzon(userAgent: string): Promise<HarvestedSession> {
   const chromiumPath =
     process.env.CHROMIUM_PATH || "/run/current-system/sw/bin/chromium";
 
+  // Strict isolation: strip Wayland display so Chromium NEVER connects to Niri
+  delete process.env.WAYLAND_DISPLAY;
+  const display = ensureXvfb();
+  process.env.DISPLAY = display;
+
   clearStaleProfileLock(PROFILE_DIR);
   const browser = await puppeteer.launch({
     executablePath: chromiumPath,
-    headless: false,
+    headless: false, // Headed in RAM framebuffer (Xvfb :99)
     args: [
       "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
       "--disable-dev-shm-usage",
+      "--ozone-platform=x11",
       `--user-data-dir=${PROFILE_DIR}`,
     ],
   });
@@ -263,60 +340,59 @@ async function harvestOzon(userAgent: string): Promise<HarvestedSession> {
       throw new Error("No cookies collected from Ozon challenge");
     }
 
-    return {
+    const session: HarvestedSession = {
       marketplace: "ozon",
       cookies: cookieList.join("; "),
       expires_at: Math.floor(Date.now() / 1000) + 86400, // 24h TTL
       user_agent: userAgent,
     };
+
+    saveCachedSession("ozon", session);
+    return session;
   } finally {
     browser.process()?.kill("SIGKILL");
   }
 }
-async function fetchOzonComposer(
+
+async function fetchOzonComposerFast(
   urlParam: string,
   userAgent: string
 ): Promise<string> {
-  const chromiumPath =
-    process.env.CHROMIUM_PATH || "/run/current-system/sw/bin/chromium";
-
-  clearStaleProfileLock(PROFILE_DIR);
-  const browser = await puppeteer.launch({
-    executablePath: chromiumPath,
-    headless: false,
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      `--user-data-dir=${PROFILE_DIR}`,
-    ],
-  });
-
-  try {
-    const page = await browser.newPage();
-    await page.setUserAgent(userAgent);
-    await page.goto("https://www.ozon.ru/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-    // Wait for Variti challenge to settle
-    await sleep(5000);
-
-    const jsonText = await page.evaluate(async (endpointUrl: string) => {
-      const fullUrl =
-        "/api/composer-api.bx/page/json/v2?url=" +
-        encodeURIComponent(endpointUrl);
-      const res = await fetch(fullUrl, {
-        headers: { accept: "application/json" },
-        credentials: "include",
-      });
-      return await res.text();
-    }, urlParam);
-
-    return jsonText;
-  } finally {
-    browser.process()?.kill("SIGKILL");
+  let session = loadCachedSession("ozon");
+  if (!session) {
+    session = await harvestOzon(userAgent);
   }
+
+  const encodedUrl = urlParam.startsWith("http")
+    ? urlParam
+    : "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=" +
+      encodeURIComponent(urlParam);
+
+  const makeReq = async (sess: HarvestedSession) => {
+    return await fetch(encodedUrl, {
+      headers: {
+        accept: "application/json",
+        "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        referer: "https://www.ozon.ru/",
+        "sec-ch-ua":
+          '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+        "user-agent": sess.user_agent || DEFAULT_USER_AGENT,
+        cookie: sess.cookies,
+      },
+    });
+  };
+
+  let res = await makeReq(session);
+
+  // If session expired or challenged upstream, re-bootstrap once via Xvfb
+  if (res.status === 403 || res.headers.get("ozon-antibot")) {
+    session = await harvestOzon(userAgent);
+    res = await makeReq(session);
+  }
+
+  return await res.text();
 }
 
 async function main() {
@@ -332,7 +408,7 @@ async function main() {
   });
 
   if (values["fetch-composer"]) {
-    const jsonText = await fetchOzonComposer(
+    const jsonText = await fetchOzonComposerFast(
       values["fetch-composer"],
       values["user-agent"] ?? DEFAULT_USER_AGENT
     );
