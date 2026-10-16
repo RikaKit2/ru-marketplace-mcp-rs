@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::str::FromStr;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 use ru_marketplace_mcp::domain::Marketplace;
 use ru_marketplace_mcp::mcp::McpServer;
 use ru_marketplace_mcp::services::AggregatorService;
-
+use ru_marketplace_mcp::session::SessionManager;
 #[derive(Parser, Debug)]
 #[command(
     name = "ru-marketplace-mcp",
@@ -15,6 +15,9 @@ use ru_marketplace_mcp::services::AggregatorService;
     about = "Russian Marketplaces Price Comparison & MCP Server (Wildberries, Ozon, DNS, Citilink)"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Run in MCP Stdio JSON-RPC 2.0 mode (default when no arguments provided)
     #[arg(long, default_value_t = false)]
     stdio: bool,
@@ -32,6 +35,16 @@ struct Cli {
     limit: usize,
 }
 
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Manually trigger anti-bot token harvest and update cookie cache
+    RefreshTokens {
+        /// Marketplace name (e.g. wildberries, ozon, or all)
+        #[arg(short, long, default_value = "all")]
+        marketplace: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // CRITICAL: MCP stdio transport requires stdout to be pure JSON-RPC!
@@ -44,6 +57,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let cli = Cli::parse();
+    // Subcommand execution
+    if let Some(Commands::RefreshTokens { marketplace }) = cli.command {
+        info!("Manual token refresh requested for marketplace: '{marketplace}'");
+        let session_manager = SessionManager::default();
+        let targets = if marketplace.eq_ignore_ascii_case("all") {
+            vec!["wildberries", "ozon"]
+        } else {
+            vec![marketplace.as_str()]
+        };
+
+        let mut results = Vec::new();
+        for target in targets {
+            match session_manager.refresh(target).await {
+                Ok(session) => {
+                    info!("Successfully refreshed tokens for {target}");
+                    results.push(session);
+                }
+                Err(err) => {
+                    error!("Failed to refresh tokens for {target}: {err}");
+                }
+            }
+        }
+
+        println!("{}", serde_json::to_string_pretty(&results)?);
+        return Ok(());
+    }
 
     // Direct comparison mode from CLI
     if let Some(query) = cli.compare {

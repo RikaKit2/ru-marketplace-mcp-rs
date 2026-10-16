@@ -1,11 +1,14 @@
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use serde_json::Value;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 use super::MarketplaceConnector;
 use crate::domain::{
     Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus, WafProtection,
 };
+use crate::session::SessionManager;
+use crate::transport::apply_browser_fingerprint;
 
 const WB_DEFAULT_DEST: &str = "-1257786"; // Moscow region ID for valid prices/stocks
 const WB_SEARCH_URL: &str = "https://search.wb.ru/exactmatch/ru/common/v9/search";
@@ -16,6 +19,7 @@ const WB_CARD_URL: &str = "https://card.wb.ru/cards/v4/detail";
 pub struct WildberriesConnector {
     client: reqwest::Client,
     dest: String,
+    session_manager: Arc<SessionManager>,
 }
 
 impl Default for WildberriesConnector {
@@ -25,31 +29,17 @@ impl Default for WildberriesConnector {
 }
 
 impl WildberriesConnector {
-    /// Create a new connector with custom destination region ID.
+    /// Create a new connector with custom destination region ID and default session manager.
     pub fn new(dest: impl Into<String>) -> Self {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            ),
-        );
-        headers.insert(
-            ORIGIN,
-            HeaderValue::from_static("https://www.wildberries.ru"),
-        );
-        headers.insert(
-            REFERER,
-            HeaderValue::from_static("https://www.wildberries.ru/"),
-        );
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/plain, */*"),
-        );
+        Self::with_session_manager(dest, Arc::new(SessionManager::default()))
+    }
 
+    /// Create a new connector with custom destination and shared session manager.
+    pub fn with_session_manager(
+        dest: impl Into<String>,
+        session_manager: Arc<SessionManager>,
+    ) -> Self {
         let client = reqwest::Client::builder()
-            .default_headers(headers)
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
@@ -57,6 +47,7 @@ impl WildberriesConnector {
         Self {
             client,
             dest: dest.into(),
+            session_manager,
         }
     }
 
@@ -201,10 +192,10 @@ impl MarketplaceConnector for WildberriesConnector {
             return Ok(Vec::new());
         }
 
-        let response = self
-            .client
-            .get(WB_SEARCH_URL)
-            .query(&[
+        let mut session = self.session_manager.get_session("wildberries").await;
+
+        let send_search = |sess: Option<&crate::session::SessionData>| {
+            let req = self.client.get(WB_SEARCH_URL).query(&[
                 ("appType", "1"),
                 ("curr", "rub"),
                 ("dest", &self.dest),
@@ -213,21 +204,41 @@ impl MarketplaceConnector for WildberriesConnector {
                 ("resultset", "catalog"),
                 ("page", "1"),
                 ("spp", "30"),
-            ])
-            .send()
-            .await?;
+            ]);
+            apply_browser_fingerprint(req, sess)
+        };
 
-        let status = response.status();
+        let mut response = send_search(session.as_ref()).send().await?;
+        let mut status = response.status();
+
+        // Auto-refresh tokens on HTTP 403 (Forbidden) or HTTP 498 (Token challenge required)
+        if status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498 {
+            info!(
+                status = %status,
+                "Wildberries challenge/forbidden response; refreshing tokens and retrying..."
+            );
+            match self.session_manager.refresh("wildberries").await {
+                Ok(new_session) => {
+                    session = Some(new_session);
+                    response = send_search(session.as_ref()).send().await?;
+                    status = response.status();
+                }
+                Err(err) => {
+                    warn!("Failed to refresh Wildberries session: {err}");
+                }
+            }
+        }
+
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(ScraperError::RateLimited {
                 retry_after_secs: Some(5),
             });
         }
 
-        if status == reqwest::StatusCode::FORBIDDEN {
+        if status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498 {
             return Err(ScraperError::WafBlocked {
                 waf: WafProtection::Wbaas,
-                details: "Wildberries returned HTTP 403 Forbidden (Wbaas Anti-Bot)".to_string(),
+                details: format!("Wildberries returned HTTP {status} (Wbaas Anti-Bot)"),
             });
         }
 
@@ -235,6 +246,14 @@ impl MarketplaceConnector for WildberriesConnector {
 
         // Check if response is an anti-bot challenge page
         if body.contains("captcha") || body.contains("wbaas") || body.contains("Access denied") {
+            // Attempt one refresh if challenge page returned with 200 OK
+            if let Ok(new_session) = self.session_manager.refresh("wildberries").await {
+                let retry_resp = send_search(Some(&new_session)).send().await?;
+                let retry_body = retry_resp.text().await?;
+                if !retry_body.contains("captcha") && !retry_body.contains("wbaas") {
+                    return Self::parse_products_json(&retry_body, limit);
+                }
+            }
             return Err(ScraperError::WafBlocked {
                 waf: WafProtection::Wbaas,
                 details: "Wildberries captcha or Wbaas challenge detected".to_string(),
@@ -246,30 +265,40 @@ impl MarketplaceConnector for WildberriesConnector {
 
     async fn get_card(&self, item_id: &str) -> Result<ProductOffer, ScraperError> {
         let id = item_id.trim();
-        let response = self
-            .client
-            .get(WB_CARD_URL)
-            .query(&[
+        let mut session = self.session_manager.get_session("wildberries").await;
+
+        let send_card = |sess: Option<&crate::session::SessionData>| {
+            let req = self.client.get(WB_CARD_URL).query(&[
                 ("appType", "1"),
                 ("curr", "rub"),
                 ("dest", &self.dest),
                 ("spp", "30"),
                 ("nm", id),
-            ])
-            .send()
-            .await?;
+            ]);
+            apply_browser_fingerprint(req, sess)
+        };
 
-        let status = response.status();
+        let mut response = send_card(session.as_ref()).send().await?;
+        let mut status = response.status();
+
+        if (status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498)
+            && let Ok(new_session) = self.session_manager.refresh("wildberries").await
+        {
+            session = Some(new_session);
+            response = send_card(session.as_ref()).send().await?;
+            status = response.status();
+        }
+
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(ScraperError::RateLimited {
                 retry_after_secs: Some(5),
             });
         }
 
-        if status == reqwest::StatusCode::FORBIDDEN {
+        if status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498 {
             return Err(ScraperError::WafBlocked {
                 waf: WafProtection::Wbaas,
-                details: "Wildberries returned HTTP 403 Forbidden".to_string(),
+                details: format!("Wildberries returned HTTP {status}"),
             });
         }
 
