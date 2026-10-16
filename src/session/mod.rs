@@ -15,19 +15,19 @@ pub use native_solver::NativeCdpSolver;
 #[derive(Debug, Clone)]
 pub struct SessionManager {
     store: CookieStore,
-    solver: BunSolver,
+    solver: NativeCdpSolver,
     refresh_lock: Arc<Mutex<()>>,
 }
 
 impl Default for SessionManager {
     fn default() -> Self {
-        Self::new(CookieStore::default(), BunSolver::default())
+        Self::new(CookieStore::default(), NativeCdpSolver::default())
     }
 }
 
 impl SessionManager {
     /// Create a SessionManager with specific store and solver backends.
-    pub fn new(store: CookieStore, solver: BunSolver) -> Self {
+    pub fn new(store: CookieStore, solver: NativeCdpSolver) -> Self {
         Self {
             store,
             solver,
@@ -64,7 +64,12 @@ impl SessionManager {
             "Refreshing session tokens on demand..."
         );
 
-        let session = self.solver.harvest(marketplace).await?;
+        let session = if marketplace.eq_ignore_ascii_case("ozon") {
+            self.solver.harvest_ozon().await?
+        } else {
+            // Fallback for non-Ozon marketplaces to BunSolver
+            BunSolver::default().harvest(marketplace).await?
+        };
 
         if let Err(e) = self.store.insert(session.clone()).await {
             tracing::warn!(
