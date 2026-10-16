@@ -27,8 +27,12 @@ impl Default for McpServer {
 
 impl McpServer {
     pub fn new() -> Self {
-        let wb = Arc::new(WildberriesConnector::default());
-        let ozon = Arc::new(OzonConnector::default());
+        let session_manager = Arc::new(crate::session::SessionManager::default());
+        let wb = Arc::new(WildberriesConnector::with_session_manager(
+            "-1257786",
+            session_manager.clone(),
+        ));
+        let ozon = Arc::new(OzonConnector::with_session_manager(session_manager.clone()));
         let dns = Arc::new(DnsConnector::default());
         let citilink = Arc::new(CitilinkConnector::default());
 

@@ -1,12 +1,15 @@
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 use super::MarketplaceConnector;
 use crate::domain::{
     CardType, Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus,
     WafProtection,
 };
+use crate::session::SessionManager;
+use crate::transport::apply_browser_fingerprint;
 
 const OZON_COMPOSER_URL: &str = "https://www.ozon.ru/api/composer-api.bx/page/json/v2";
 
@@ -14,6 +17,7 @@ const OZON_COMPOSER_URL: &str = "https://www.ozon.ru/api/composer-api.bx/page/js
 #[derive(Debug, Clone)]
 pub struct OzonConnector {
     client: reqwest::Client,
+    session_manager: Arc<SessionManager>,
 }
 
 impl Default for OzonConnector {
@@ -24,30 +28,19 @@ impl Default for OzonConnector {
 
 impl OzonConnector {
     pub fn new() -> Self {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            ),
-        );
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/plain, */*"),
-        );
-        headers.insert(
-            ACCEPT_LANGUAGE,
-            HeaderValue::from_static("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"),
-        );
+        Self::with_session_manager(Arc::new(SessionManager::default()))
+    }
 
+    pub fn with_session_manager(session_manager: Arc<SessionManager>) -> Self {
         let client = reqwest::Client::builder()
-            .default_headers(headers)
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        Self { client }
+        Self {
+            client,
+            session_manager,
+        }
     }
 
     /// Parse price strings like "1 499 ₽", "12 490 ₽", "1499" into integer rubles.
@@ -285,14 +278,36 @@ impl MarketplaceConnector for OzonConnector {
         }
 
         let encoded_url = format!("/search/?text={}", urlencoding(trimmed));
-        let response = self
-            .client
-            .get(OZON_COMPOSER_URL)
-            .query(&[("url", &encoded_url)])
-            .send()
-            .await?;
+        let mut session = self.session_manager.get_session("ozon").await;
 
-        let status = response.status();
+        let send_search = |sess: Option<&crate::session::SessionData>| {
+            let req = self
+                .client
+                .get(OZON_COMPOSER_URL)
+                .query(&[("url", &encoded_url)]);
+            apply_browser_fingerprint(req, sess)
+        };
+
+        let mut response = send_search(session.as_ref()).send().await?;
+        let mut status = response.status();
+
+        if status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498 {
+            info!(
+                status = %status,
+                "Ozon challenge/forbidden response; refreshing tokens and retrying..."
+            );
+            match self.session_manager.refresh("ozon").await {
+                Ok(new_session) => {
+                    session = Some(new_session);
+                    response = send_search(session.as_ref()).send().await?;
+                    status = response.status();
+                }
+                Err(err) => {
+                    warn!("Failed to refresh Ozon session: {err}");
+                }
+            }
+        }
+
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(ScraperError::RateLimited {
                 retry_after_secs: Some(10),
@@ -325,14 +340,27 @@ impl MarketplaceConnector for OzonConnector {
     async fn get_card(&self, item_id: &str) -> Result<ProductOffer, ScraperError> {
         let id = item_id.trim();
         let encoded_url = format!("/product/{id}/");
-        let response = self
-            .client
-            .get(OZON_COMPOSER_URL)
-            .query(&[("url", &encoded_url)])
-            .send()
-            .await?;
+        let mut session = self.session_manager.get_session("ozon").await;
 
-        let status = response.status();
+        let send_card = |sess: Option<&crate::session::SessionData>| {
+            let req = self
+                .client
+                .get(OZON_COMPOSER_URL)
+                .query(&[("url", &encoded_url)]);
+            apply_browser_fingerprint(req, sess)
+        };
+
+        let mut response = send_card(session.as_ref()).send().await?;
+        let mut status = response.status();
+
+        if (status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498)
+            && let Ok(new_session) = self.session_manager.refresh("ozon").await
+        {
+            session = Some(new_session);
+            response = send_card(session.as_ref()).send().await?;
+            status = response.status();
+        }
+
         if status == reqwest::StatusCode::FORBIDDEN {
             return Err(ScraperError::WafBlocked {
                 waf: WafProtection::CloudflareTurnstile,

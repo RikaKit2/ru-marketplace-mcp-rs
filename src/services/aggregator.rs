@@ -63,18 +63,25 @@ impl Default for AggregatorService {
 }
 
 impl AggregatorService {
-    /// Create an aggregator with default connectors (WB, Ozon, DNS, Citilink).
+    /// Create an aggregator with default connectors sharing a default SessionManager.
     pub fn with_defaults() -> Self {
+        Self::with_session_manager(Arc::new(crate::session::SessionManager::default()))
+    }
+
+    /// Create an aggregator with connectors sharing the provided SessionManager.
+    pub fn with_session_manager(session_manager: Arc<crate::session::SessionManager>) -> Self {
         Self {
             connectors: vec![
-                Arc::new(WildberriesConnector::default()),
-                Arc::new(OzonConnector::default()),
+                Arc::new(WildberriesConnector::with_session_manager(
+                    "-1257786",
+                    session_manager.clone(),
+                )),
+                Arc::new(OzonConnector::with_session_manager(session_manager)),
                 Arc::new(DnsConnector::default()),
                 Arc::new(CitilinkConnector::default()),
             ],
         }
     }
-
     /// Create an aggregator with custom connector instances.
     pub fn new(connectors: Vec<Arc<dyn MarketplaceConnector>>) -> Self {
         Self { connectors }

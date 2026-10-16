@@ -1,0 +1,88 @@
+pub mod bun_solver;
+pub mod cookies;
+
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::info;
+
+use crate::domain::ScraperError;
+pub use bun_solver::BunSolver;
+pub use cookies::{CookieStore, SessionData};
+
+/// Central coordinator for marketplace session credentials and lazy token refreshing.
+#[derive(Debug, Clone)]
+pub struct SessionManager {
+    store: CookieStore,
+    solver: BunSolver,
+    refresh_lock: Arc<Mutex<()>>,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new(CookieStore::default(), BunSolver::default())
+    }
+}
+
+impl SessionManager {
+    /// Create a SessionManager with specific store and solver backends.
+    pub fn new(store: CookieStore, solver: BunSolver) -> Self {
+        Self {
+            store,
+            solver,
+            refresh_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Retrieve valid unexpired session data for a marketplace without triggering a refresh.
+    pub async fn get_session(&self, marketplace: &str) -> Option<SessionData> {
+        self.store.get(marketplace).await
+    }
+
+    /// Retrieve existing valid session, or lazily harvest fresh tokens via Bun solver.
+    pub async fn get_or_refresh(&self, marketplace: &str) -> Result<SessionData, ScraperError> {
+        if let Some(session) = self.store.get(marketplace).await {
+            return Ok(session);
+        }
+
+        self.refresh(marketplace).await
+    }
+
+    /// Forcefully harvest fresh session tokens and update the persistent cache.
+    /// Employs double-checked locking to prevent concurrent solver thundering herds.
+    pub async fn refresh(&self, marketplace: &str) -> Result<SessionData, ScraperError> {
+        let _guard = self.refresh_lock.lock().await;
+
+        // Double check if a concurrent caller refreshed while we waited on the lock
+        if let Some(session) = self.store.get(marketplace).await {
+            return Ok(session);
+        }
+
+        info!(
+            marketplace = %marketplace,
+            "Refreshing session tokens on demand..."
+        );
+
+        let session = self.solver.harvest(marketplace).await?;
+
+        if let Err(e) = self.store.insert(session.clone()).await {
+            tracing::warn!(
+                error = %e,
+                marketplace = %marketplace,
+                "Failed to write refreshed session to cookie cache"
+            );
+        }
+
+        Ok(session)
+    }
+
+    /// Invalidate existing session for a marketplace.
+    pub async fn invalidate(&self, marketplace: &str) {
+        if let Err(e) = self.store.remove(marketplace).await {
+            tracing::warn!(
+                error = %e,
+                marketplace = %marketplace,
+                "Failed to remove invalidated session from cookie cache"
+            );
+        }
+    }
+}
