@@ -9,6 +9,6 @@ pub use marketplaces::{
 };
 pub use mcp::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpCallResult, McpTextContent, McpTool,
-    McpToolRequest, error_codes,
+    McpToolRequest, SearchFilterOptions, SortOrder, error_codes,
 };
 pub use prices::{PriceTier, ProductOffer};

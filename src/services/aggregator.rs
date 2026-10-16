@@ -6,7 +6,7 @@ use tokio::task::JoinSet;
 use crate::connectors::{
     CitilinkConnector, DnsConnector, MarketplaceConnector, OzonConnector, WildberriesConnector,
 };
-use crate::domain::{Currency, Marketplace, ProductOffer};
+use crate::domain::{Currency, Marketplace, ProductOffer, SearchFilterOptions, SortOrder};
 
 /// Outcome report for a single marketplace query attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,11 +101,14 @@ impl AggregatorService {
         query: &str,
         per_source_limit: usize,
         filter_sources: Option<&[Marketplace]>,
+        filters: Option<&SearchFilterOptions>,
     ) -> CompareResult {
         let query_trimmed = query.trim().to_string();
         let mut join_set = JoinSet::new();
 
         let mut sources_queried = Vec::new();
+        let default_filters = SearchFilterOptions::default();
+        let active_filters = filters.cloned().unwrap_or(default_filters);
 
         for connector in &self.connectors {
             let mkt = connector.marketplace();
@@ -118,10 +121,11 @@ impl AggregatorService {
             sources_queried.push(mkt);
             let conn = Arc::clone(connector);
             let q = query_trimmed.clone();
+            let f = active_filters.clone();
 
             join_set.spawn(async move {
                 let start = Instant::now();
-                let res = conn.search(&q, per_source_limit).await;
+                let res = conn.search(&q, per_source_limit, &f).await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 (mkt, res, elapsed_ms)
             });
@@ -170,14 +174,69 @@ impl AggregatorService {
             }
         }
 
-        // Sort offers: RUB offers first by ascending price, then non-RUB offers
-        all_offers.sort_by(|a, b| match (a.rank_price_rub(), b.rank_price_rub()) {
-            (Some(pa), Some(pb)) => pa.cmp(&pb),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.title.cmp(&b.title),
-        });
+        // Apply post-aggregation price filtering
+        if let Some(f) = filters {
+            if let Some(min) = f.min_price {
+                all_offers.retain(|o| o.price_tier.price() >= min);
+            }
+            if let Some(max) = f.max_price {
+                all_offers.retain(|o| o.price_tier.price() <= max);
+            }
+        }
 
+        // Sort offers based on requested criteria or default to price ascending
+        if let Some(f) = filters
+            && let Some(sort) = f.sort
+        {
+            match sort {
+                SortOrder::PriceAsc => {
+                    all_offers.sort_by(|a, b| match (a.rank_price_rub(), b.rank_price_rub()) {
+                        (Some(pa), Some(pb)) => pa.cmp(&pb),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.title.cmp(&b.title),
+                    });
+                }
+                SortOrder::PriceDesc => {
+                    all_offers.sort_by(|a, b| match (a.rank_price_rub(), b.rank_price_rub()) {
+                        (Some(pa), Some(pb)) => pb.cmp(&pa),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => b.title.cmp(&a.title),
+                    });
+                }
+                SortOrder::Rating => {
+                    all_offers.sort_by(|a, b| {
+                        b.rating
+                            .unwrap_or(0.0)
+                            .partial_cmp(&a.rating.unwrap_or(0.0))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                SortOrder::Reviews => {
+                    all_offers.sort_by(|a, b| {
+                        b.review_count
+                            .unwrap_or(0)
+                            .cmp(&a.review_count.unwrap_or(0))
+                    });
+                }
+                SortOrder::Discount | SortOrder::Popular => {
+                    all_offers.sort_by(|a, b| match (a.rank_price_rub(), b.rank_price_rub()) {
+                        (Some(pa), Some(pb)) => pa.cmp(&pb),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.title.cmp(&b.title),
+                    });
+                }
+            }
+        } else {
+            all_offers.sort_by(|a, b| match (a.rank_price_rub(), b.rank_price_rub()) {
+                (Some(pa), Some(pb)) => pa.cmp(&pb),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.title.cmp(&b.title),
+            });
+        }
         let cheapest = all_offers
             .iter()
             .find(|o| o.currency == Currency::Rub)
