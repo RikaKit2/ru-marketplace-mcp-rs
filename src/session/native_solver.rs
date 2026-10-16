@@ -169,13 +169,16 @@ impl NativeCdpSolver {
         let config = BrowserConfig::builder()
             .chrome_executable(&self.chromium_bin)
             .new_headless_mode()
+            .no_sandbox()
             .user_data_dir(&self.user_data_dir)
             .env("DISPLAY", &display)
             .env("WAYLAND_DISPLAY", "")
             .args([
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-gpu",
                 "--ozone-platform=x11",
                 &format!("--user-data-dir={user_data_str}"),
             ])
