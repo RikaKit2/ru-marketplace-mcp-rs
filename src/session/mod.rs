@@ -85,4 +85,9 @@ impl SessionManager {
             );
         }
     }
+
+    /// Fetch raw JSON from Ozon Composer API through solver when TLS/WAF blocks direct HTTP.
+    pub async fn fetch_composer(&self, url_param: &str) -> Result<String, ScraperError> {
+        self.solver.fetch_composer(url_param).await
+    }
 }

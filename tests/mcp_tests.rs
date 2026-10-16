@@ -60,12 +60,14 @@ async fn test_mcp_tools_list() {
         .map(|t| t.get("name").unwrap().as_str().unwrap())
         .collect();
 
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 7);
     assert!(tool_names.contains(&"compare_prices"));
     assert!(tool_names.contains(&"wb_search"));
     assert!(tool_names.contains(&"ozon_search"));
     assert!(tool_names.contains(&"dns_search"));
     assert!(tool_names.contains(&"citilink_search"));
+    assert!(tool_names.contains(&"ozon_card"));
+    assert!(tool_names.contains(&"wb_card"));
 }
 
 #[tokio::test]
