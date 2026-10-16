@@ -70,6 +70,20 @@ impl BunSolver {
                 }
             }
         }
+        // NixOS config path (accessible in sandboxed-dev-tools)
+        let nixos_script = Path::new(
+            "/home/user/nixos-config/modules/ai/mcp/ru-marketplace-mcp/scripts/harvest_tokens.ts",
+        );
+        if nixos_script.exists() {
+            return nixos_script.to_path_buf();
+        }
+
+        // Known repo installation path fallback
+        let repo_script =
+            Path::new("/home/user/projects/ru-marketplace-mcp-rs/scripts/harvest_tokens.ts");
+        if repo_script.exists() {
+            return repo_script.to_path_buf();
+        }
 
         // Project root default fallback
         PathBuf::from("scripts/harvest_tokens.ts")
@@ -86,13 +100,21 @@ impl BunSolver {
         );
 
         let mut cmd = tokio::process::Command::new(&self.bun_bin);
-        cmd.arg("run")
-            .arg(&self.script_path)
+        cmd.arg(&self.script_path)
             .arg("--marketplace")
             .arg(&m_name)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        if let Ok(disp) = std::env::var("DISPLAY") {
+            cmd.env("DISPLAY", disp);
+        } else {
+            cmd.env("DISPLAY", ":0");
+        }
+        if let Ok(wdisp) = std::env::var("WAYLAND_DISPLAY") {
+            cmd.env("WAYLAND_DISPLAY", wdisp);
+        }
         let output = cmd.output().await.map_err(|e| {
             error!(
                 error = %e,
@@ -159,5 +181,58 @@ impl BunSolver {
         );
 
         Ok(session)
+    }
+
+    /// Fetch raw JSON from Ozon Composer API using Chromium context.
+    pub async fn fetch_composer(&self, url_param: &str) -> Result<String, ScraperError> {
+        info!(
+            url = %url_param,
+            bun = ?self.bun_bin,
+            script = ?self.script_path,
+            "Invoking Bun Chromium solver to fetch Composer API JSON directly..."
+        );
+
+        let mut cmd = tokio::process::Command::new(&self.bun_bin);
+        cmd.arg(&self.script_path)
+            .arg("--fetch-composer")
+            .arg(url_param)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        if let Ok(disp) = std::env::var("DISPLAY") {
+            cmd.env("DISPLAY", disp);
+        } else {
+            cmd.env("DISPLAY", ":0");
+        }
+        if let Ok(wdisp) = std::env::var("WAYLAND_DISPLAY") {
+            cmd.env("WAYLAND_DISPLAY", wdisp);
+        }
+        let output = cmd.output().await.map_err(|e| {
+            error!(error = %e, "Failed to spawn Bun Composer solver");
+            ScraperError::WafBlocked {
+                waf: WafProtection::CloudflareTurnstile,
+                details: format!("Failed to spawn Bun Composer solver: {e}"),
+            }
+        })?;
+
+        if !output.status.success() {
+            let stderr_str = String::from_utf8_lossy(&output.stderr);
+            error!(status = ?output.status, stderr = %stderr_str.trim(), "Bun Composer solver failed");
+            return Err(ScraperError::WafBlocked {
+                waf: WafProtection::CloudflareTurnstile,
+                details: format!("Bun Composer solver failed: {stderr_str}"),
+            });
+        }
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let file_path = stdout_str.trim();
+        let json_text = tokio::fs::read_to_string(file_path).await.map_err(|e| {
+            error!(error = %e, path = %file_path, "Failed to read payload from solver file");
+            ScraperError::Parse(format!(
+                "Failed to read solver payload from {file_path}: {e}"
+            ))
+        })?;
+        let _ = tokio::fs::remove_file(file_path).await;
+        Ok(json_text)
     }
 }

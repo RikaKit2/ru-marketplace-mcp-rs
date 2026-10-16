@@ -255,6 +255,34 @@ impl McpServer {
                     "required": ["query"]
                 }),
             },
+            McpTool {
+                name: "ozon_card".to_string(),
+                description: "Get detailed product card information for an Ozon item by SKU or URL.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Ozon product SKU or ID, e.g. '3087570418'"
+                        }
+                    },
+                    "required": ["item_id"]
+                }),
+            },
+            McpTool {
+                name: "wb_card".to_string(),
+                description: "Get detailed product card information for a Wildberries item by article (nm ID).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Wildberries article / nm ID, e.g. '12345678'"
+                        }
+                    },
+                    "required": ["item_id"]
+                }),
+            },
         ]
     }
 
@@ -264,48 +292,102 @@ impl McpServer {
             .get("query")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        let item_id = args
+            .get("item_id")
+            .or_else(|| args.get("sku"))
+            .or_else(|| args.get("id"))
+            .or_else(|| args.get("query"))
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .unwrap_or_default();
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
-        if query.trim().is_empty() {
-            return McpCallResult::error("Argument 'query' must not be empty");
-        }
-
         match name {
+            "ozon_card" => {
+                if item_id.trim().is_empty() {
+                    return McpCallResult::error("Argument 'item_id' must not be empty");
+                }
+                match self.ozon.get_card(&item_id).await {
+                    Ok(offer) => match serde_json::to_string_pretty(&offer) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Ozon get_card error: {e}")),
+                }
+            }
+            "wb_card" => {
+                if item_id.trim().is_empty() {
+                    return McpCallResult::error("Argument 'item_id' must not be empty");
+                }
+                match self.wb.get_card(&item_id).await {
+                    Ok(offer) => match serde_json::to_string_pretty(&offer) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Wildberries get_card error: {e}")),
+                }
+            }
             "compare_prices" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
                 let result = self.aggregator.compare_prices(query, limit, None).await;
                 match serde_json::to_string_pretty(&result) {
                     Ok(text) => McpCallResult::text(text),
                     Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
                 }
             }
-            "wb_search" => match self.wb.search(query, limit.max(10)).await {
-                Ok(offers) => match serde_json::to_string_pretty(&offers) {
-                    Ok(text) => McpCallResult::text(text),
-                    Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
-                },
-                Err(e) => McpCallResult::error(format!("Wildberries search error: {e}")),
-            },
-            "ozon_search" => match self.ozon.search(query, limit.max(10)).await {
-                Ok(offers) => match serde_json::to_string_pretty(&offers) {
-                    Ok(text) => McpCallResult::text(text),
-                    Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
-                },
-                Err(e) => McpCallResult::error(format!("Ozon search error: {e}")),
-            },
-            "dns_search" => match self.dns.search(query, limit.max(10)).await {
-                Ok(offers) => match serde_json::to_string_pretty(&offers) {
-                    Ok(text) => McpCallResult::text(text),
-                    Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
-                },
-                Err(e) => McpCallResult::error(format!("DNS search error: {e}")),
-            },
-            "citilink_search" => match self.citilink.search(query, limit.max(10)).await {
-                Ok(offers) => match serde_json::to_string_pretty(&offers) {
-                    Ok(text) => McpCallResult::text(text),
-                    Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
-                },
-                Err(e) => McpCallResult::error(format!("Citilink search error: {e}")),
-            },
+            "wb_search" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
+                match self.wb.search(query, limit.max(10)).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Wildberries search error: {e}")),
+                }
+            }
+            "ozon_search" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
+                match self.ozon.search(query, limit.max(10)).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Ozon search error: {e}")),
+                }
+            }
+            "dns_search" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
+                match self.dns.search(query, limit.max(10)).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("DNS search error: {e}")),
+                }
+            }
+            "citilink_search" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
+                match self.citilink.search(query, limit.max(10)).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Citilink search error: {e}")),
+                }
+            }
             unknown => McpCallResult::error(format!("Unknown tool: '{unknown}'")),
         }
     }

@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::MarketplaceConnector;
 use crate::domain::{
     CardType, Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus,
-    WafProtection,
 };
 use crate::session::SessionManager;
 use crate::transport::apply_browser_fingerprint;
@@ -33,7 +32,8 @@ impl OzonConnector {
 
     pub fn with_session_manager(session_manager: Arc<SessionManager>) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(25))
+            .cookie_store(true)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -160,13 +160,21 @@ impl OzonConnector {
                         }
                     }
                     "textAtom" => {
-                        if title.is_none()
-                            && let Some(t) = atom
-                                .get("textAtom")
-                                .and_then(|a| a.get("text"))
-                                .and_then(|v| v.as_str())
+                        if let Some(t) = atom
+                            .get("textAtom")
+                            .and_then(|a| a.get("text"))
+                            .and_then(|v| v.as_str())
                         {
-                            title = Some(t.trim().to_string());
+                            let trimmed = t.trim();
+                            if !trimmed.contains("осталось")
+                                && !trimmed.contains("шт")
+                                && !trimmed.contains("ед")
+                                && !trimmed.ends_with('%')
+                                && (title.is_none()
+                                    || title.as_ref().is_some_and(|cur| cur.len() < trimmed.len()))
+                            {
+                                title = Some(trimmed.to_string());
+                            }
                         }
                     }
                     "priceV2" => {
@@ -263,6 +271,121 @@ impl OzonConnector {
             product_id: sku,
         })
     }
+
+    /// Parse an Ozon product card Composer API JSON response.
+    pub fn parse_card_json(json_str: &str, item_id: &str) -> Result<ProductOffer, ScraperError> {
+        let root: Value = serde_json::from_str(json_str)
+            .map_err(|e| ScraperError::Parse(format!("Failed to parse Ozon card JSON: {e}")))?;
+
+        let widgets = match root.get("widgetStates") {
+            Some(Value::Object(map)) => map,
+            _ => {
+                return Err(ScraperError::NotFound {
+                    query: item_id.to_string(),
+                });
+            }
+        };
+
+        let mut title = String::new();
+        let mut base_price = 0u64;
+        let mut card_price = 0u64;
+        let mut original_price = None;
+        let mut is_available = true;
+        let mut rating = None;
+        let mut review_count = None;
+        let mut seller = None;
+
+        for (key, val) in widgets {
+            let widget_obj: Value = if let Some(s) = val.as_str() {
+                serde_json::from_str(s).unwrap_or(Value::Null)
+            } else {
+                val.clone()
+            };
+
+            if key.starts_with("webProductHeading") {
+                if let Some(t) = widget_obj.get("title").and_then(|v| v.as_str()) {
+                    title = t.to_string();
+                }
+            } else if key.starts_with("webPrice-") {
+                if let Some(avail) = widget_obj.get("isAvailable").and_then(|v| v.as_bool()) {
+                    is_available = avail;
+                }
+                if let Some(p_str) = widget_obj.get("price").and_then(|v| v.as_str()) {
+                    base_price = Self::parse_price_str(p_str).unwrap_or(0);
+                }
+                if let Some(cp_str) = widget_obj.get("cardPrice").and_then(|v| v.as_str()) {
+                    card_price = Self::parse_price_str(cp_str).unwrap_or(0);
+                }
+                if let Some(orig_str) = widget_obj.get("originalPrice").and_then(|v| v.as_str()) {
+                    original_price = Self::parse_price_str(orig_str);
+                }
+            } else if key.starts_with("webReviewProductScore") {
+                if let Some(score) = widget_obj.get("totalScore").and_then(|v| v.as_f64()) {
+                    rating = Some(score as f32);
+                }
+                if let Some(count) = widget_obj.get("reviewsCount").and_then(|v| v.as_u64()) {
+                    review_count = Some(count as u32);
+                }
+            } else if key.starts_with("webBrand")
+                && seller.is_none()
+                && let Some(brand_name) = widget_obj
+                    .get("content")
+                    .and_then(|c| c.get("title"))
+                    .and_then(|t| t.get("text"))
+                    .and_then(|arr| arr.get(0))
+                    .and_then(|item| item.get("content"))
+                    .and_then(|v| v.as_str())
+            {
+                seller = Some(brand_name.to_string());
+            } else if key.starts_with("webCurrentSeller")
+                && let Some(s_name) = widget_obj
+                    .get("name")
+                    .or_else(|| widget_obj.get("title"))
+                    .and_then(|v| v.as_str())
+            {
+                seller = Some(s_name.to_string());
+            }
+        }
+
+        if title.is_empty() {
+            return Err(ScraperError::NotFound {
+                query: item_id.to_string(),
+            });
+        }
+
+        let price_tier = if card_price > 0 && card_price < base_price {
+            PriceTier::MarketplaceCard {
+                price: card_price,
+                card: CardType::OzonCard,
+            }
+        } else if base_price > 0 {
+            PriceTier::Base(base_price)
+        } else if card_price > 0 {
+            PriceTier::Base(card_price)
+        } else {
+            PriceTier::Base(0)
+        };
+
+        let stock = if is_available {
+            StockStatus::InStock(1)
+        } else {
+            StockStatus::OutOfStock
+        };
+
+        Ok(ProductOffer {
+            marketplace: Marketplace::Ozon,
+            title,
+            url: format!("https://www.ozon.ru/product/{item_id}/"),
+            price_tier,
+            original_price,
+            currency: Currency::Rub,
+            rating,
+            review_count,
+            stock,
+            seller,
+            product_id: Some(item_id.to_string()),
+        })
+    }
 }
 
 #[async_trait]
@@ -277,117 +400,89 @@ impl MarketplaceConnector for OzonConnector {
             return Ok(Vec::new());
         }
 
-        let encoded_url = format!("/search/?text={}", urlencoding(trimmed));
+        let url_param = format!("/search/?text={trimmed}");
         let mut session = self.session_manager.get_session("ozon").await;
+
+        if session.is_none()
+            && let Ok(new_session) = self.session_manager.refresh("ozon").await
+        {
+            session = Some(new_session);
+        }
 
         let send_search = |sess: Option<&crate::session::SessionData>| {
             let req = self
                 .client
                 .get(OZON_COMPOSER_URL)
-                .query(&[("url", &encoded_url)]);
+                .query(&[("url", &url_param)]);
             apply_browser_fingerprint(req, sess)
         };
 
-        let mut response = send_search(session.as_ref()).send().await?;
-        let mut status = response.status();
-
-        if status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498 {
-            info!(
-                status = %status,
-                "Ozon challenge/forbidden response; refreshing tokens and retrying..."
-            );
-            match self.session_manager.refresh("ozon").await {
-                Ok(new_session) => {
-                    session = Some(new_session);
-                    response = send_search(session.as_ref()).send().await?;
-                    status = response.status();
-                }
-                Err(err) => {
-                    warn!("Failed to refresh Ozon session: {err}");
+        let body = match send_search(session.as_ref()).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await?;
+                if text.contains("challenge-platform") || text.contains("cf-turnstile") {
+                    info!(
+                        "Ozon challenge page detected in direct HTTP body, falling back to Chromium solver..."
+                    );
+                    self.session_manager.fetch_composer(&url_param).await?
+                } else {
+                    text
                 }
             }
-        }
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ScraperError::RateLimited {
-                retry_after_secs: Some(10),
-            });
-        }
-
-        if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ScraperError::WafBlocked {
-                waf: WafProtection::CloudflareTurnstile,
-                details: "Ozon returned HTTP 403 Forbidden (Cloudflare Challenge)".to_string(),
-            });
-        }
-
-        let body = response.text().await?;
-
-        // Check if response is Cloudflare challenge
-        if body.contains("challenge-platform")
-            || body.contains("__cf_bm")
-            || body.contains("cf-turnstile")
-        {
-            return Err(ScraperError::WafBlocked {
-                waf: WafProtection::CloudflareTurnstile,
-                details: "Ozon Cloudflare Turnstile challenge detected".to_string(),
-            });
-        }
+            Ok(resp) => {
+                info!(status = %resp.status(), "Ozon direct HTTP returned non-success, falling back to Chromium solver...");
+                self.session_manager.fetch_composer(&url_param).await?
+            }
+            Err(err) => {
+                info!(error = %err, "Ozon direct HTTP failed, falling back to Chromium solver...");
+                self.session_manager.fetch_composer(&url_param).await?
+            }
+        };
 
         Self::parse_composer_json(&body, limit)
     }
 
     async fn get_card(&self, item_id: &str) -> Result<ProductOffer, ScraperError> {
         let id = item_id.trim();
-        let encoded_url = format!("/product/{id}/");
+        let url_param = format!("/product/{id}/");
         let mut session = self.session_manager.get_session("ozon").await;
+
+        if session.is_none()
+            && let Ok(new_session) = self.session_manager.refresh("ozon").await
+        {
+            session = Some(new_session);
+        }
 
         let send_card = |sess: Option<&crate::session::SessionData>| {
             let req = self
                 .client
                 .get(OZON_COMPOSER_URL)
-                .query(&[("url", &encoded_url)]);
+                .query(&[("url", &url_param)]);
             apply_browser_fingerprint(req, sess)
         };
 
-        let mut response = send_card(session.as_ref()).send().await?;
-        let mut status = response.status();
+        let body = match send_card(session.as_ref()).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await?;
+                if text.contains("challenge-platform") || text.contains("cf-turnstile") {
+                    info!(
+                        "Ozon challenge page detected on card view, falling back to Chromium solver..."
+                    );
+                    self.session_manager.fetch_composer(&url_param).await?
+                } else {
+                    text
+                }
+            }
+            Ok(resp) => {
+                info!(status = %resp.status(), "Ozon card direct HTTP returned non-success, falling back to Chromium solver...");
+                self.session_manager.fetch_composer(&url_param).await?
+            }
+            Err(err) => {
+                info!(error = %err, "Ozon card direct HTTP failed, falling back to Chromium solver...");
+                self.session_manager.fetch_composer(&url_param).await?
+            }
+        };
 
-        if (status == reqwest::StatusCode::FORBIDDEN || status.as_u16() == 498)
-            && let Ok(new_session) = self.session_manager.refresh("ozon").await
-        {
-            session = Some(new_session);
-            response = send_card(session.as_ref()).send().await?;
-            status = response.status();
-        }
-
-        if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ScraperError::WafBlocked {
-                waf: WafProtection::CloudflareTurnstile,
-                details: "Ozon HTTP 403 on card view".to_string(),
-            });
-        }
-
-        let body = response.text().await?;
-        let offers = Self::parse_composer_json(&body, 1)?;
-
-        offers
-            .into_iter()
-            .next()
-            .ok_or_else(|| ScraperError::NotFound {
-                query: id.to_string(),
-            })
+        Self::parse_card_json(&body, id)
     }
-}
-
-fn urlencoding(s: &str) -> String {
-    let mut encoded = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            encoded.push(b as char);
-        } else {
-            encoded.push_str(&format!("%{:02X}", b));
-        }
-    }
-    encoded
 }

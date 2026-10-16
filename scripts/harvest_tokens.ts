@@ -13,6 +13,24 @@
  */
 
 import { parseArgs } from "util";
+import fs from "fs";
+import puppeteer from "puppeteer-core";
+
+const PROFILE_DIR = "/tmp/ozon-harvester-profile";
+
+function clearStaleProfileLock(dir: string): void {
+  for (const lock of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    try {
+      fs.unlinkSync(`${dir}/${lock}`);
+    } catch {}
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+}
 
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -211,55 +229,94 @@ async function harvestWildberries(userAgent: string): Promise<HarvestedSession> 
 }
 
 async function harvestOzon(userAgent: string): Promise<HarvestedSession> {
-  const baseHeaders = {
-    "User-Agent": userAgent,
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "sec-ch-ua":
-      '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Linux"',
-  };
+  const chromiumPath =
+    process.env.CHROMIUM_PATH || "/run/current-system/sw/bin/chromium";
 
-  const collectedCookies: Record<string, string> = {};
+  clearStaleProfileLock(PROFILE_DIR);
+  const browser = await puppeteer.launch({
+    executablePath: chromiumPath,
+    headless: false,
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      `--user-data-dir=${PROFILE_DIR}`,
+    ],
+  });
 
-  for (const url of [
-    "https://www.ozon.ru/",
-    "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=%2F",
-  ]) {
-    try {
-      const res = await fetch(url, {
-        headers: baseHeaders,
-        redirect: "manual",
-      });
-      const cookieHeader = res.headers.get("set-cookie");
-      if (cookieHeader) {
-        for (const item of cookieHeader.split(/,\s*(?=[^;]+=[^;]+)/)) {
-          const parts = item.split(";")[0]?.trim();
-          if (parts) {
-            const [k, v] = parts.split("=");
-            if (k && v) {
-              collectedCookies[k.trim()] = v.trim();
-            }
-          }
-        }
-      }
-    } catch {
-      // Continue collecting
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(userAgent);
+    await page.goto("https://www.ozon.ru/", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+    // Wait for Variti challenge to settle and set all tokens
+    await sleep(6000);
+
+    const cookies = await page.cookies();
+    const cookieList = cookies.map(
+      (c: { name: string; value: string }) => `${c.name}=${c.value}`
+    );
+
+    if (cookieList.length === 0) {
+      throw new Error("No cookies collected from Ozon challenge");
     }
+
+    return {
+      marketplace: "ozon",
+      cookies: cookieList.join("; "),
+      expires_at: Math.floor(Date.now() / 1000) + 86400, // 24h TTL
+      user_agent: userAgent,
+    };
+  } finally {
+    browser.process()?.kill("SIGKILL");
   }
+}
+async function fetchOzonComposer(
+  urlParam: string,
+  userAgent: string
+): Promise<string> {
+  const chromiumPath =
+    process.env.CHROMIUM_PATH || "/run/current-system/sw/bin/chromium";
 
-  const cookieList = Object.entries(collectedCookies).map(
-    ([k, v]) => `${k}=${v}`
-  );
+  clearStaleProfileLock(PROFILE_DIR);
+  const browser = await puppeteer.launch({
+    executablePath: chromiumPath,
+    headless: false,
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      `--user-data-dir=${PROFILE_DIR}`,
+    ],
+  });
 
-  return {
-    marketplace: "ozon",
-    cookies: cookieList.join("; "),
-    expires_at: Math.floor(Date.now() / 1000) + 86400, // 24h TTL
-    user_agent: userAgent,
-  };
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(userAgent);
+    await page.goto("https://www.ozon.ru/", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+    // Wait for Variti challenge to settle
+    await sleep(5000);
+
+    const jsonText = await page.evaluate(async (endpointUrl: string) => {
+      const fullUrl =
+        "/api/composer-api.bx/page/json/v2?url=" +
+        encodeURIComponent(endpointUrl);
+      const res = await fetch(fullUrl, {
+        headers: { accept: "application/json" },
+        credentials: "include",
+      });
+      return await res.text();
+    }, urlParam);
+
+    return jsonText;
+  } finally {
+    browser.process()?.kill("SIGKILL");
+  }
 }
 
 async function main() {
@@ -268,10 +325,24 @@ async function main() {
     options: {
       marketplace: { type: "string", short: "m", default: "wildberries" },
       "user-agent": { type: "string", default: DEFAULT_USER_AGENT },
+      "fetch-composer": { type: "string" },
     },
     strict: true,
     allowPositionals: false,
   });
+
+  if (values["fetch-composer"]) {
+    const jsonText = await fetchOzonComposer(
+      values["fetch-composer"],
+      values["user-agent"] ?? DEFAULT_USER_AGENT
+    );
+    const cacheDir = "/home/user/.cache/ru-marketplace-mcp";
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const outFile = `${cacheDir}/composer_${Date.now()}_${Math.floor(Math.random() * 10000)}.json`;
+    fs.writeFileSync(outFile, jsonText);
+    process.stdout.write(outFile);
+    process.exit(0);
+  }
 
   const marketplace = (values.marketplace ?? "wildberries").toLowerCase();
   const userAgent = values["user-agent"] ?? DEFAULT_USER_AGENT;
