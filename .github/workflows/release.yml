@@ -26,8 +26,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
-
+          sudo apt-get install -y pkg-config libssl-dev xvfb
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -58,8 +58,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
-
+          sudo apt-get install -y pkg-config libssl-dev xvfb
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
