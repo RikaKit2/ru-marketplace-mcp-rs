@@ -107,13 +107,9 @@ impl BunSolver {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        cmd.env_remove("WAYLAND_DISPLAY");
         if let Ok(disp) = std::env::var("DISPLAY") {
             cmd.env("DISPLAY", disp);
-        } else {
-            cmd.env("DISPLAY", ":0");
-        }
-        if let Ok(wdisp) = std::env::var("WAYLAND_DISPLAY") {
-            cmd.env("WAYLAND_DISPLAY", wdisp);
         }
         let output = cmd.output().await.map_err(|e| {
             error!(
@@ -200,13 +196,9 @@ impl BunSolver {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        cmd.env_remove("WAYLAND_DISPLAY");
         if let Ok(disp) = std::env::var("DISPLAY") {
             cmd.env("DISPLAY", disp);
-        } else {
-            cmd.env("DISPLAY", ":0");
-        }
-        if let Ok(wdisp) = std::env::var("WAYLAND_DISPLAY") {
-            cmd.env("WAYLAND_DISPLAY", wdisp);
         }
         let output = cmd.output().await.map_err(|e| {
             error!(error = %e, "Failed to spawn Bun Composer solver");
