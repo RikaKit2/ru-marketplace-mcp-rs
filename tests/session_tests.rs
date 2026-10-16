@@ -143,7 +143,7 @@ async fn test_browser_headers_generation() {
 async fn test_session_manager_cached_hit() {
     let cache_path = unique_temp_cache_path("mgr-cached");
     let store = CookieStore::new(&cache_path);
-    let solver = ru_marketplace_mcp::session::BunSolver::default();
+    let solver = ru_marketplace_mcp::session::NativeCdpSolver::default();
     let manager = SessionManager::new(store.clone(), solver);
 
     let now = SystemTime::now()

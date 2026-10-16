@@ -168,8 +168,10 @@ impl NativeCdpSolver {
 
         let config = BrowserConfig::builder()
             .chrome_executable(&self.chromium_bin)
-            .with_head()
+            .new_headless_mode()
             .user_data_dir(&self.user_data_dir)
+            .env("DISPLAY", &display)
+            .env("WAYLAND_DISPLAY", "")
             .args([
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
@@ -213,6 +215,119 @@ impl NativeCdpSolver {
         handler_task.abort();
 
         harvest_result
+    }
+    /// Fetch raw JSON from Ozon Composer API through CDP in-memory page evaluation.
+    pub async fn fetch_composer(&self, url_param: &str) -> Result<String, ScraperError> {
+        info!(
+            url_param = %url_param,
+            chromium = ?self.chromium_bin,
+            profile = ?self.user_data_dir,
+            "Fetching Ozon Composer JSON via NativeCdpSolver (in-memory CDP)..."
+        );
+
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+        }
+        let display = Self::ensure_xvfb();
+        unsafe {
+            std::env::set_var("DISPLAY", &display);
+        }
+        Self::clear_stale_profile_lock(&self.user_data_dir);
+
+        let user_data_str = self.user_data_dir.to_string_lossy().to_string();
+
+        let config = BrowserConfig::builder()
+            .chrome_executable(&self.chromium_bin)
+            .new_headless_mode()
+            .user_data_dir(&self.user_data_dir)
+            .env("DISPLAY", &display)
+            .env("WAYLAND_DISPLAY", "")
+            .args([
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--ozone-platform=x11",
+                &format!("--user-data-dir={user_data_str}"),
+            ])
+            .build()
+            .map_err(|e| {
+                error!(error = %e, "Failed to build BrowserConfig for chromiumoxide");
+                ScraperError::WafBlocked {
+                    waf: WafProtection::Variti,
+                    details: format!("Failed to configure Chromium: {e}"),
+                }
+            })?;
+
+        let (mut browser, mut handler) = Browser::launch(config).await.map_err(|e| {
+            error!(error = %e, "Failed to launch Chromium browser via chromiumoxide");
+            ScraperError::WafBlocked {
+                waf: WafProtection::Variti,
+                details: format!("Failed to launch Chromium: {e}"),
+            }
+        })?;
+
+        let handler_task = tokio::spawn(async move {
+            while let Some(event) = handler.next().await {
+                if let Err(e) = event {
+                    debug!(error = %e, "CDP handler event error");
+                    break;
+                }
+            }
+        });
+
+        let fetch_result = self.drive_composer_fetch(&mut browser, url_param).await;
+
+        if let Err(e) = browser.close().await {
+            debug!(error = %e, "Browser close error or already closed");
+        }
+        handler_task.abort();
+
+        fetch_result
+    }
+
+    async fn drive_composer_fetch(
+        &self,
+        browser: &mut Browser,
+        url_param: &str,
+    ) -> Result<String, ScraperError> {
+        let page = browser
+            .new_page("https://www.ozon.ru/")
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to open page https://www.ozon.ru/ for composer fetch");
+                ScraperError::WafBlocked {
+                    waf: WafProtection::Variti,
+                    details: format!("Failed to open Ozon page: {e}"),
+                }
+            })?;
+
+        // Wait for Variti challenge to settle and session cookies to be present
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        let encoded_url_param =
+            serde_json::to_string(url_param).unwrap_or_else(|_| format!("\"{}\"", url_param));
+        let script = format!(
+            "() => fetch('/api/composer-api.bx/page/json/v2?url=' + encodeURIComponent({}), {{ headers: {{ accept: 'application/json' }}, credentials: 'include' }}).then(r => r.text())",
+            encoded_url_param
+        );
+
+        let json_result: String = page
+            .evaluate_function(script)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to evaluate fetch_composer expression via CDP");
+                ScraperError::WafBlocked {
+                    waf: WafProtection::Variti,
+                    details: format!("Failed to evaluate fetch_composer script: {e}"),
+                }
+            })?
+            .into_value()
+            .map_err(|e| {
+                error!(error = %e, "Failed to deserialize fetch_composer result string");
+                ScraperError::Parse(format!("Failed to parse fetch_composer string result: {e}"))
+            })?;
+
+        Ok(json_result)
     }
 
     async fn drive_ozon_harvest(&self, browser: &mut Browser) -> Result<SessionData, ScraperError> {
