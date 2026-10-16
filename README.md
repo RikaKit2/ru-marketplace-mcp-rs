@@ -70,10 +70,10 @@ When making raw direct HTTP requests to search endpoints:
 ## 4. Roadmap: Zero-Overhead Token Refresh Architecture
 
 To unblock search while preserving near-zero resource consumption on low-power CPUs:
-* **Lazy On-Demand Token Refresh (Bun Solver):**
+* **Lazy On-Demand Token Refresh (Pure Rust Native CDP Solver):**
   * Store harvested cookies in `~/.cache/ru-marketplace-mcp/cookies.json`.
   * **99.9% of requests:** Pure Rust direct HTTP with cached cookies (50 ms latency, 0% CPU, 0 MB overhead).
-  * **On 498/403 or cold start:** Rust triggers a lightweight background script via `bun run scripts/solve_challenge.ts` for 1–2 seconds to compute the JS PoW token and update the cache. Bun then terminates immediately.
+  * **On 498/403 or cold start:** Rust triggers an isolated headless browser session via `NativeCdpSolver` (`chromiumoxide` + `Xvfb`) in the background to solve challenges, extract session cookies, and update the cache. Zero runtime script dependencies.
 
 ---
 

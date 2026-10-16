@@ -14,5 +14,5 @@ pub use domain::{
 };
 pub use mcp::McpServer;
 pub use services::{AggregatorService, CompareResult, SourceOutcome};
-pub use session::{BunSolver, CookieStore, SessionData, SessionManager};
+pub use session::{CookieStore, SessionData, SessionManager};
 pub use transport::{apply_browser_fingerprint, build_browser_headers};

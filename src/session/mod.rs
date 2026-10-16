@@ -1,4 +1,3 @@
-pub mod bun_solver;
 pub mod cookies;
 pub mod native_solver;
 
@@ -7,7 +6,6 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::domain::ScraperError;
-pub use bun_solver::BunSolver;
 pub use cookies::{CookieStore, SessionData};
 pub use native_solver::NativeCdpSolver;
 
@@ -40,7 +38,7 @@ impl SessionManager {
         self.store.get(marketplace).await
     }
 
-    /// Retrieve existing valid session, or lazily harvest fresh tokens via Bun solver.
+    /// Retrieve existing valid session, or lazily harvest fresh tokens via native CDP solver.
     pub async fn get_or_refresh(&self, marketplace: &str) -> Result<SessionData, ScraperError> {
         if let Some(session) = self.store.get(marketplace).await {
             return Ok(session);
@@ -67,8 +65,11 @@ impl SessionManager {
         let session = if marketplace.eq_ignore_ascii_case("ozon") {
             self.solver.harvest_ozon().await?
         } else {
-            // Fallback for non-Ozon marketplaces to BunSolver
-            BunSolver::default().harvest(marketplace).await?
+            return Err(ScraperError::NotFound {
+                query: format!(
+                    "Token refresh solver not implemented for marketplace '{marketplace}'"
+                ),
+            });
         };
 
         if let Err(e) = self.store.insert(session.clone()).await {
