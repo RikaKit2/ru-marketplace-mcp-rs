@@ -1309,22 +1309,120 @@ dependencies = [
 ]
 
 [[package]]
-name = "ru-marketplace-mcp"
+name = "ru-marketplace-citilink"
 version = "0.1.1"
 dependencies = [
  "async-trait",
- "async-tungstenite",
- "chromiumoxide",
- "clap",
  "futures",
- "libc",
+ "reqwest",
+ "ru-marketplace-core",
+ "ru-marketplace-solver",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ru-marketplace-core"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ru-marketplace-dns"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest",
+ "ru-marketplace-core",
+ "ru-marketplace-solver",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ru-marketplace-mcp"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "clap",
+ "futures",
+ "reqwest",
+ "ru-marketplace-citilink",
+ "ru-marketplace-core",
+ "ru-marketplace-dns",
+ "ru-marketplace-ozon",
+ "ru-marketplace-solver",
+ "ru-marketplace-wb",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ru-marketplace-ozon"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest",
+ "ru-marketplace-core",
+ "ru-marketplace-solver",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ru-marketplace-solver"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "async-tungstenite",
+ "chromiumoxide",
+ "futures",
+ "libc",
+ "reqwest",
+ "ru-marketplace-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ru-marketplace-wb"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest",
+ "ru-marketplace-core",
+ "ru-marketplace-solver",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
