@@ -6,6 +6,13 @@ on:
     tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish as GitHub Release'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,8 +33,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev xvfb
+          sudo apt-get install -y pkg-config libssl-dev xvfb jq
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -37,10 +45,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Cargo clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Cargo test
-        run: cargo test --workspace
+        run: xvfb-run -a cargo test --workspace
 
   build-release:
     name: Build Release Binary
@@ -58,19 +66,29 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev xvfb
+          sudo apt-get install -y pkg-config libssl-dev xvfb jq
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release -p ru-marketplace-mcp
 
-      - name: Package release tarball
+      - name: Package release assets
         run: |
+          # Extract dynamic version from workspace package metadata
+          PKG_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="ru-marketplace-mcp") | "v" + .version')
           VERSION="${{ github.ref_name }}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
-            VERSION="v0.1.1"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ] || [ "$VERSION" = "master" ]; then
+            VERSION="$PKG_VERSION"
           fi
+
+          echo "Packaging version: ${VERSION}"
+
+          # Compute SHA-256 for standalone binary
+          sha256sum target/release/ru-marketplace-mcp > target/release/ru-marketplace-mcp.sha256
+
+          # Create compressed tarball
           ARCHIVE_NAME="ru-marketplace-mcp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           tar -czvf "${ARCHIVE_NAME}" -C target/release ru-marketplace-mcp
           sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
@@ -79,14 +97,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ru-marketplace-mcp-linux-x86_64
-          path: target/release/ru-marketplace-mcp
+          path: |
+            target/release/ru-marketplace-mcp
+            target/release/ru-marketplace-mcp.sha256
 
       - name: Publish to GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            target/release/ru-marketplace-mcp
+            target/release/ru-marketplace-mcp.sha256
             ru-marketplace-mcp-*-x86_64-unknown-linux-gnu.tar.gz
             ru-marketplace-mcp-*-x86_64-unknown-linux-gnu.tar.gz.sha256
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
