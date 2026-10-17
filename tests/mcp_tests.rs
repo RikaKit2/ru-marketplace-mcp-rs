@@ -60,7 +60,7 @@ async fn test_mcp_tools_list() {
         .map(|t| t.get("name").unwrap().as_str().unwrap())
         .collect();
 
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 9);
     assert!(tool_names.contains(&"compare_prices"));
     assert!(tool_names.contains(&"wb_search"));
     assert!(tool_names.contains(&"ozon_search"));
@@ -68,6 +68,8 @@ async fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"citilink_search"));
     assert!(tool_names.contains(&"ozon_card"));
     assert!(tool_names.contains(&"wb_card"));
+    assert!(tool_names.contains(&"ozon_session_start"));
+    assert!(tool_names.contains(&"ozon_session_stop"));
 }
 
 #[tokio::test]
@@ -166,4 +168,23 @@ async fn test_mcp_tools_list_schema_filters() {
         .unwrap();
     assert!(sort_enum.contains(&json!("price_asc")));
     assert!(sort_enum.contains(&json!("reviews")));
+}
+
+#[tokio::test]
+async fn test_mcp_ozon_session_tools() {
+    let server = McpServer::new();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(99)),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "ozon_session_stop",
+            "arguments": {}
+        })),
+    };
+    let resp = server.handle_request(req).await.expect("Expected response");
+    let result = resp.result.expect("Expected result");
+    let content = result.get("content").unwrap().as_array().unwrap();
+    let text = content[0].get("text").unwrap().as_str().unwrap();
+    assert!(text.contains("No active Ozon session"));
 }

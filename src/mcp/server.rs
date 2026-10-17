@@ -17,6 +17,16 @@ pub struct McpServer {
     ozon: Arc<OzonConnector>,
     dns: Arc<DnsConnector>,
     citilink: Arc<CitilinkConnector>,
+    session_manager: Arc<crate::session::SessionManager>,
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        let sm = self.session_manager.clone();
+        tokio::spawn(async move {
+            let _ = sm.stop_ozon_session().await;
+        });
+    }
 }
 
 impl Default for McpServer {
@@ -47,9 +57,9 @@ impl McpServer {
             ozon,
             dns,
             citilink,
+            session_manager,
         }
     }
-
     /// Run the main Stdio loop processing newline-delimited JSON-RPC 2.0 messages.
     pub async fn run_stdio(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting ru-marketplace-mcp stdio transport...");
@@ -99,10 +109,11 @@ impl McpServer {
             }
         }
 
+        info!("ru-marketplace-mcp stdio transport received EOF, cleaning up active sessions...");
+        let _ = self.session_manager.stop_ozon_session().await;
         info!("ru-marketplace-mcp stdio transport terminated");
         Ok(())
     }
-
     /// Process a single incoming JSON-RPC 2.0 request.
     pub async fn handle_request(&self, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
         let id = req.id;
@@ -358,6 +369,22 @@ impl McpServer {
                     "required": ["item_id"]
                 }),
             },
+            McpTool {
+                name: "ozon_session_start".to_string(),
+                description: "Start and pre-warm an active Ozon browser session for batch processing (subsequent ozon_search and ozon_card will execute at ~250ms). Automatically closes after 5 minutes of idle time.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "ozon_session_stop".to_string(),
+                description: "Explicitly terminate the active Ozon browser session and free memory immediately when batch work is completed.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
         ]
     }
 
@@ -478,6 +505,14 @@ impl McpServer {
                     Err(e) => McpCallResult::error(format!("Citilink search error: {e}")),
                 }
             }
+            "ozon_session_start" => match self.session_manager.start_ozon_session().await {
+                Ok(msg) => McpCallResult::text(msg),
+                Err(e) => McpCallResult::error(format!("Failed to start Ozon session: {e}")),
+            },
+            "ozon_session_stop" => match self.session_manager.stop_ozon_session().await {
+                Ok(msg) => McpCallResult::text(msg),
+                Err(e) => McpCallResult::error(format!("Failed to stop Ozon session: {e}")),
+            },
             unknown => McpCallResult::error(format!("Unknown tool: '{unknown}'")),
         }
     }

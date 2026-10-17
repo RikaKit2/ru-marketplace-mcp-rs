@@ -100,4 +100,14 @@ impl SessionManager {
     pub async fn fetch_composer(&self, url_param: &str) -> Result<String, ScraperError> {
         self.solver.fetch_composer(url_param).await
     }
+
+    /// Explicitly start and warm up an active Ozon browser session for fast batch processing (~250ms).
+    pub async fn start_ozon_session(&self) -> Result<String, ScraperError> {
+        self.solver.start_session().await
+    }
+
+    /// Explicitly terminate active Ozon browser session and free memory immediately.
+    pub async fn stop_ozon_session(&self) -> Result<String, ScraperError> {
+        self.solver.stop_session().await
+    }
 }
