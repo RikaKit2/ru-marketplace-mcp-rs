@@ -1,0 +1,22 @@
+[package]
+name = "ru-marketplace-solver"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ru-marketplace-core.workspace = true
+async-trait.workspace = true
+async-tungstenite.workspace = true
+futures.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+chromiumoxide.workspace = true

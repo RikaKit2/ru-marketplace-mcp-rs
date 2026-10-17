@@ -1,9 +1,30 @@
-[package]
-name = "ru-marketplace-mcp"
+[workspace]
+resolver = "3"
+default-members = ["crates/mcp"]
+members = [
+    "crates/core",
+    "crates/solver",
+    "crates/ozon",
+    "crates/wb",
+    "crates/dns",
+    "crates/citilink",
+    "crates/mcp",
+]
+
+[workspace.package]
 version = "0.1.1"
 edition = "2024"
+authors = ["RikaKit2"]
+license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
+ru-marketplace-core = { path = "crates/core" }
+ru-marketplace-solver = { path = "crates/solver" }
+ru-marketplace-ozon = { path = "crates/ozon" }
+ru-marketplace-wb = { path = "crates/wb" }
+ru-marketplace-dns = { path = "crates/dns" }
+ru-marketplace-citilink = { path = "crates/citilink" }
+
 futures = "0.3.31"
 async-trait = "0.1.92"
 clap = { version = "4.6.7", features = ["derive", "env"] }
@@ -16,6 +37,4 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 async-tungstenite = { version = "0.32.1", features = ["tokio-runtime"] }
 libc = "0.2"
-
-[dev-dependencies]
 chromiumoxide = { version = "0.9.1", default-features = false, features = ["bytes"] }

@@ -1,0 +1,28 @@
+[package]
+name = "ru-marketplace-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ru-marketplace-core.workspace = true
+ru-marketplace-solver.workspace = true
+ru-marketplace-ozon.workspace = true
+ru-marketplace-wb.workspace = true
+ru-marketplace-dns.workspace = true
+ru-marketplace-citilink.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "ru-marketplace-mcp"
+path = "src/main.rs"
