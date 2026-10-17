@@ -1313,9 +1313,11 @@ name = "ru-marketplace-mcp"
 version = "0.1.1"
 dependencies = [
  "async-trait",
+ "async-tungstenite",
  "chromiumoxide",
  "clap",
  "futures",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

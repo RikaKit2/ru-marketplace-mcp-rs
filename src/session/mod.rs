@@ -44,19 +44,21 @@ impl SessionManager {
             return Ok(session);
         }
 
-        self.refresh(marketplace).await
-    }
-
-    /// Forcefully harvest fresh session tokens and update the persistent cache.
-    /// Employs double-checked locking to prevent concurrent solver thundering herds.
-    pub async fn refresh(&self, marketplace: &str) -> Result<SessionData, ScraperError> {
         let _guard = self.refresh_lock.lock().await;
-
-        // Double check if a concurrent caller refreshed while we waited on the lock
         if let Some(session) = self.store.get(marketplace).await {
             return Ok(session);
         }
 
+        self.harvest_and_store(marketplace).await
+    }
+
+    /// Forcefully harvest fresh session tokens and update the persistent cache.
+    pub async fn refresh(&self, marketplace: &str) -> Result<SessionData, ScraperError> {
+        let _guard = self.refresh_lock.lock().await;
+        self.harvest_and_store(marketplace).await
+    }
+
+    async fn harvest_and_store(&self, marketplace: &str) -> Result<SessionData, ScraperError> {
         info!(
             marketplace = %marketplace,
             "Refreshing session tokens on demand..."
