@@ -68,7 +68,7 @@ impl BasketResolver {
 
         let mut join_set = tokio::task::JoinSet::new();
 
-        for i in 1..=40 {
+        for i in 1..=60 {
             let host = format!("basket-{i:02}.wbbasket.ru");
             let url = format!("https://{host}{probe_path}");
             let client = self.client.clone();
@@ -173,7 +173,7 @@ impl BasketResolver {
             && let Some(last_point) = points.last()
             && let Some(rub_kopecks) = last_point
                 .get("price")
-                .and_then(|p| p.get("RUB"))
+                .and_then(|p| p.get("RUB").or_else(|| p.get("rub")))
                 .and_then(|v| v.as_f64())
         {
             PriceTier::Base((rub_kopecks / 100.0) as u64)

@@ -16,7 +16,12 @@ pub fn parse_products_json(
         .get("data")
         .and_then(|d| d.get("products"))
         .and_then(|p| p.as_array())
-        .or_else(|| root.get("products").and_then(|p| p.as_array()));
+        .or_else(|| root.get("products").and_then(|p| p.as_array()))
+        .or_else(|| {
+            root.get("payload")
+                .and_then(|p| p.get("products"))
+                .and_then(|p| p.as_array())
+        });
 
     let Some(products_array) = products else {
         return Ok(Vec::new());
@@ -93,6 +98,22 @@ pub fn parse_products_json(
 
 /// Extract (current_price_kopecks, original_price_kopecks) from product object.
 pub fn extract_prices(p: &Value) -> (Option<u64>, Option<u64>) {
+    // Check top-level price object (v18 / modern format)
+    if let Some(price_obj) = p.get("price") {
+        let current = price_obj
+            .get("total")
+            .or_else(|| price_obj.get("product"))
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0);
+        let basic = price_obj
+            .get("basic")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0);
+        if current.is_some() {
+            return (current, basic.or(current));
+        }
+    }
+
     if let Some(sizes) = p.get("sizes").and_then(|v| v.as_array()) {
         for sz in sizes {
             if let Some(price_obj) = sz.get("price") {

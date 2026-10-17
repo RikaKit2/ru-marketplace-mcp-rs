@@ -12,7 +12,7 @@ use ru_marketplace_solver::NativeCdpSolver;
 
 use super::parser::{parse_card_json, parse_composer_json};
 
-pub const OZON_COMPOSER_URL: &str = "https://www.ozon.ru/api/composer-api.bx/page/json/v2";
+pub const OZON_COMPOSER_URL: &str = "https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2";
 
 /// Ozon marketplace connector utilizing the Composer JSON API with Chromium solver integration.
 #[derive(Debug, Clone)]
@@ -67,7 +67,7 @@ impl MarketplaceConnector for OzonConnector {
             return Ok(Vec::new());
         }
 
-        let mut url_param = format!("/search/?text={trimmed}");
+        let mut url_param = format!("/search/?text={trimmed}&__rr=1");
 
         // Append price filters
         match (filters.min_price, filters.max_price) {
@@ -125,10 +125,15 @@ impl MarketplaceConnector for OzonConnector {
                 }
             }
         } else {
-            // By design: search goes directly through browser tab
-            self.solver
-                .fetch_in_tab(Marketplace::Ozon, &full_url)
-                .await?
+            match self.solver.fetch_in_tab(Marketplace::Ozon, &full_url).await {
+                Ok(json) if !json.contains("incidentId") && !json.contains("incident_id") => json,
+                _ => {
+                    let page_url = format!("https://www.ozon.ru/search/?text={trimmed}");
+                    self.solver
+                        .navigate_and_extract_html(Marketplace::Ozon, &page_url)
+                        .await?
+                }
+            }
         };
 
         let mut offers = parse_composer_json(&body, limit)?;
@@ -149,7 +154,7 @@ impl MarketplaceConnector for OzonConnector {
 
     async fn get_card(&self, item_id: &str) -> Result<ProductOffer, ScraperError> {
         let id = item_id.trim();
-        let url_param = format!("/product/{id}/");
+        let url_param = format!("/product/{id}/?__rr=1");
         let full_url = format!("{OZON_COMPOSER_URL}?url={url_param}");
         let session = self.session_manager.get_session("ozon").await;
 
@@ -180,9 +185,15 @@ impl MarketplaceConnector for OzonConnector {
                 }
             }
         } else {
-            self.solver
-                .fetch_in_tab(Marketplace::Ozon, &full_url)
-                .await?
+            match self.solver.fetch_in_tab(Marketplace::Ozon, &full_url).await {
+                Ok(json) if !json.contains("incidentId") && !json.contains("incident_id") => json,
+                _ => {
+                    let page_url = format!("https://www.ozon.ru/product/{id}/");
+                    self.solver
+                        .navigate_and_extract_html(Marketplace::Ozon, &page_url)
+                        .await?
+                }
+            }
         };
 
         parse_card_json(&body, id)

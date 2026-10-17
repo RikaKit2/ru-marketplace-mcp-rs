@@ -12,19 +12,15 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
-        packages = {
-          default = pkgs.stdenv.mkDerivation {
+        packages = rec {
+          default = pkgs.rustPlatform.buildRustPackage {
             pname = "ru-marketplace-mcp";
-            version = "0.2.0";
-            src = ./dist;
+            version = "0.2.1";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
 
-            dontBuild = true;
-            dontConfigure = true;
-
-            installPhase = ''
-              mkdir -p $out/bin
-              cp ru-marketplace-mcp $out/bin/
-              chmod +x $out/bin/ru-marketplace-mcp
+            preBuild = ''
+              rm -rf .cargo
             '';
 
             meta = {
@@ -33,17 +29,7 @@
             };
           };
 
-          from-source = pkgs.rustPlatform.buildRustPackage {
-            pname = "ru-marketplace-mcp";
-            version = "0.2.0";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-
-            meta = {
-              description = "Russian Marketplaces Price Comparison & MCP Server";
-              mainProgram = "ru-marketplace-mcp";
-            };
-          };
+          from-source = default;
         };
 
         apps.default = {

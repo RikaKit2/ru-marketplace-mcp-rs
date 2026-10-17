@@ -507,7 +507,7 @@ impl NativeCdpSolver {
             loop {
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 let mut guard = session_arc.lock().await;
-                if let Some(session) = &*guard {
+                if let Some(session) = guard.as_ref() {
                     if session.last_used.elapsed() > Duration::from_secs(300) {
                         info!("Persistent browser solver idle for 5 minutes, shutting down...");
                         if let Some(s) = guard.take() {
@@ -553,7 +553,7 @@ impl NativeCdpSolver {
         // 1. Try persistent session
         {
             let mut session_guard = self.persistent_session.lock().await;
-            if let Some(session) = &mut *session_guard {
+            if let Some(session) = session_guard.as_mut() {
                 session.last_used = std::time::Instant::now();
 
                 // Get or create tab for this marketplace
@@ -648,12 +648,142 @@ impl NativeCdpSolver {
             return Err(ScraperError::WafBlocked {
                 waf: WafProtection::Variti,
                 details: format!(
-                    "Browser fetch for {marketplace} failed with HTTP status {status}"
+                    "Browser fetch for {marketplace} failed with HTTP status {status}: {text}"
                 ),
             });
         }
 
         Ok(text.to_string())
+    }
+
+    /// Navigate a marketplace tab directly to allow anti-bot challenge scripts (Qrator/Variti)
+    /// to execute in native Chromium V8, then extract the resulting DOM HTML.
+    pub async fn navigate_and_extract_html(
+        &self,
+        marketplace: Marketplace,
+        page_url: &str,
+    ) -> Result<String, ScraperError> {
+        let mut session_guard = self.persistent_session.lock().await;
+
+        if let Some(session) = session_guard.as_mut() {
+            session.last_used = std::time::Instant::now();
+
+            let tab_session_id = match session.tabs.get(&marketplace) {
+                Some(id) => id.clone(),
+                None => {
+                    let new_id = session.cdp.create_and_attach_tab(page_url).await?;
+                    session.tabs.insert(marketplace, new_id.clone());
+                    new_id
+                }
+            };
+
+            let _ = session
+                .cdp
+                .send_target_cmd(&tab_session_id, "Page.navigate", json!({ "url": page_url }))
+                .await;
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(6);
+            while std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let check = session
+                    .cdp
+                    .send_target_cmd(
+                        &tab_session_id,
+                        "Runtime.evaluate",
+                        json!({
+                            "expression": r#"(() => {
+                                if (document.readyState !== "complete") return false;
+                                const html = document.body ? document.body.innerHTML : "";
+                                if (html.includes("qrator_js") || html.includes("Checking your browser") || html.includes("challenge-platform")) {
+                                    return false;
+                                }
+                                return true;
+                            })()"#,
+                            "returnByValue": true
+                        }),
+                    )
+                    .await;
+
+                if let Ok(val) = check
+                    && val["result"]["result"]["value"].as_bool() == Some(true)
+                {
+                    break;
+                }
+            }
+
+            let res = session
+                .cdp
+                .send_target_cmd(
+                    &tab_session_id,
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": "document.documentElement.outerHTML",
+                        "returnByValue": true
+                    }),
+                )
+                .await?;
+
+            if let Some(html) = res["result"]["result"]["value"].as_str() {
+                return Ok(html.to_string());
+            }
+
+            return Err(ScraperError::Parse(
+                "Failed to extract document HTML from persistent tab".to_string(),
+            ));
+        }
+
+        // Fallback: On-demand launch
+        let mut cdp = self.spawn_browser().await?;
+        let tab_session_id = cdp.create_and_attach_tab(page_url).await?;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let check = cdp
+                .send_target_cmd(
+                    &tab_session_id,
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": r#"(() => {
+                            if (document.readyState !== "complete") return false;
+                            const html = document.body ? document.body.innerHTML : "";
+                            if (html.includes("qrator_js") || html.includes("Checking your browser") || html.includes("challenge-platform")) {
+                                return false;
+                            }
+                            return true;
+                        })()"#,
+                        "returnByValue": true
+                    }),
+                )
+                .await;
+
+            if let Ok(val) = check
+                && val["result"]["result"]["value"].as_bool() == Some(true)
+            {
+                break;
+            }
+        }
+
+        let res = cdp
+            .send_target_cmd(
+                &tab_session_id,
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.documentElement.outerHTML",
+                    "returnByValue": true
+                }),
+            )
+            .await?;
+
+        cdp.close().await;
+
+        if let Some(html) = res["result"]["result"]["value"].as_str() {
+            Ok(html.to_string())
+        } else {
+            Err(ScraperError::Parse(
+                "Failed to extract document HTML from on-demand browser".to_string(),
+            ))
+        }
     }
 
     /// Harvest cookies for a marketplace domain.

@@ -16,9 +16,27 @@ pub fn parse_composer_json(
     json_str: &str,
     limit: usize,
 ) -> Result<Vec<ProductOffer>, ScraperError> {
-    let root: Value = serde_json::from_str(json_str)
-        .map_err(|e| ScraperError::Parse(format!("Failed to parse Ozon JSON: {e}")))?;
-
+    let trimmed = json_str.trim();
+    let root: Value = if trimmed.starts_with('<') {
+        if let Some(widget_state) = extract_between(trimmed, "\"widgetStates\":", ",\"layout\":") {
+            let wrapped = format!("{{\"widgetStates\":{widget_state}}}");
+            serde_json::from_str(&wrapped).map_err(|e| {
+                ScraperError::Parse(format!("Failed to parse Ozon widgetStates from HTML: {e}"))
+            })?
+        } else if let Some(state_json) =
+            extract_between(trimmed, "window.__INITIAL_STATE__ = ", ";</script>")
+        {
+            serde_json::from_str(state_json).map_err(|e| {
+                ScraperError::Parse(format!("Failed to parse Ozon __INITIAL_STATE__: {e}"))
+            })?
+        } else {
+            serde_json::from_str(trimmed)
+                .map_err(|e| ScraperError::Parse(format!("Failed to parse Ozon JSON: {e}")))?
+        }
+    } else {
+        serde_json::from_str(trimmed)
+            .map_err(|e| ScraperError::Parse(format!("Failed to parse Ozon JSON: {e}")))?
+    };
     if let Some(inc) = root
         .get("incidentId")
         .or_else(|| root.get("incident_id"))
@@ -387,4 +405,14 @@ pub fn parse_card_json(json_str: &str, item_id: &str) -> Result<ProductOffer, Sc
         seller,
         product_id: Some(item_id.to_string()),
     })
+}
+
+fn extract_between<'a>(haystack: &'a str, start_tag: &str, end_tag: &str) -> Option<&'a str> {
+    let start_idx = haystack.find(start_tag)? + start_tag.len();
+    let rest = &haystack[start_idx..];
+    if end_tag.is_empty() {
+        return Some(rest);
+    }
+    let end_idx = rest.find(end_tag)?;
+    Some(&rest[..end_idx])
 }

@@ -246,8 +246,12 @@ impl MarketplaceConnector for DnsConnector {
                 let text = resp.text().await?;
                 if text.contains("qrator") || text.contains("qrator_js") {
                     if let Some(solver) = &self.solver {
-                        info!("DNS Qrator challenge detected, falling back to Chromium solver...");
-                        solver.fetch_in_tab(Marketplace::Dns, &full_url).await?
+                        info!(
+                            "DNS Qrator challenge detected, falling back to Chromium navigation..."
+                        );
+                        solver
+                            .navigate_and_extract_html(Marketplace::Dns, &full_url)
+                            .await?
                     } else {
                         return Err(ScraperError::WafBlocked {
                             waf: WafProtection::Kasada,
@@ -261,8 +265,10 @@ impl MarketplaceConnector for DnsConnector {
             }
             Ok(resp) => {
                 if let Some(solver) = &self.solver {
-                    info!(status = %resp.status(), "DNS returned non-success, falling back to Chromium solver...");
-                    solver.fetch_in_tab(Marketplace::Dns, &full_url).await?
+                    info!(status = %resp.status(), "DNS returned non-success, falling back to Chromium navigation...");
+                    solver
+                        .navigate_and_extract_html(Marketplace::Dns, &full_url)
+                        .await?
                 } else {
                     return Err(ScraperError::WafBlocked {
                         waf: WafProtection::Kasada,
@@ -272,8 +278,10 @@ impl MarketplaceConnector for DnsConnector {
             }
             Err(e) => {
                 if let Some(solver) = &self.solver {
-                    info!(error = %e, "DNS request error, falling back to Chromium solver...");
-                    solver.fetch_in_tab(Marketplace::Dns, &full_url).await?
+                    info!(error = %e, "DNS request error, falling back to Chromium navigation...");
+                    solver
+                        .navigate_and_extract_html(Marketplace::Dns, &full_url)
+                        .await?
                 } else {
                     return Err(ScraperError::Network(e));
                 }

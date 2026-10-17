@@ -239,9 +239,11 @@ impl MarketplaceConnector for CitilinkConnector {
                 let text = resp.text().await?;
                 if text.contains("qrator") || text.contains("challenge") {
                     if let Some(solver) = &self.solver {
-                        info!("Citilink challenge detected, falling back to Chromium solver...");
+                        info!(
+                            "Citilink challenge detected, falling back to Chromium navigation..."
+                        );
                         solver
-                            .fetch_in_tab(Marketplace::Citilink, &full_url)
+                            .navigate_and_extract_html(Marketplace::Citilink, &full_url)
                             .await?
                     } else {
                         return Err(ScraperError::WafBlocked {
@@ -255,9 +257,9 @@ impl MarketplaceConnector for CitilinkConnector {
             }
             Ok(resp) => {
                 if let Some(solver) = &self.solver {
-                    info!(status = %resp.status(), "Citilink returned non-success, falling back to Chromium solver...");
+                    info!(status = %resp.status(), "Citilink returned non-success, falling back to Chromium navigation...");
                     solver
-                        .fetch_in_tab(Marketplace::Citilink, &full_url)
+                        .navigate_and_extract_html(Marketplace::Citilink, &full_url)
                         .await?
                 } else {
                     return Err(ScraperError::WafBlocked {
@@ -268,9 +270,9 @@ impl MarketplaceConnector for CitilinkConnector {
             }
             Err(e) => {
                 if let Some(solver) = &self.solver {
-                    info!(error = %e, "Citilink request error, falling back to Chromium solver...");
+                    info!(error = %e, "Citilink request error, falling back to Chromium navigation...");
                     solver
-                        .fetch_in_tab(Marketplace::Citilink, &full_url)
+                        .navigate_and_extract_html(Marketplace::Citilink, &full_url)
                         .await?
                 } else {
                     return Err(ScraperError::Network(e));
