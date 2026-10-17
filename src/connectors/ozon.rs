@@ -6,7 +6,7 @@ use tracing::info;
 use super::MarketplaceConnector;
 use crate::domain::{
     CardType, Currency, Marketplace, PriceTier, ProductOffer, ScraperError, SearchFilterOptions,
-    SortOrder, StockStatus,
+    SortOrder, StockStatus, WafProtection,
 };
 use crate::session::SessionManager;
 use crate::transport::apply_browser_fingerprint;
@@ -58,19 +58,45 @@ impl OzonConnector {
         let root: Value = serde_json::from_str(json_str)
             .map_err(|e| ScraperError::Parse(format!("Failed to parse Ozon JSON: {e}")))?;
 
+        if let Some(inc) = root
+            .get("incidentId")
+            .or_else(|| root.get("incident_id"))
+            .and_then(|v| v.as_str())
+        {
+            return Err(ScraperError::WafBlocked {
+                waf: WafProtection::Variti,
+                details: format!("Ozon security incident: {inc}"),
+            });
+        }
+
         let widgets = match root.get("widgetStates") {
             Some(Value::Object(map)) => map,
-            _ => return Ok(Vec::new()),
+            _ => {
+                if let Some(err) = root
+                    .get("error")
+                    .or_else(|| root.get("message"))
+                    .and_then(|v| v.as_str())
+                {
+                    return Err(ScraperError::WafBlocked {
+                        waf: WafProtection::Variti,
+                        details: format!("Ozon error response: {err}"),
+                    });
+                }
+                return Ok(Vec::new());
+            }
         };
 
         let mut offers = Vec::new();
 
         for (key, val) in widgets {
-            if !key.starts_with("tileGridDesktop-") && !key.starts_with("searchResultsV2-") {
+            let is_search_widget = key.starts_with("tileGridDesktop-")
+                || key.starts_with("searchResultsV2-")
+                || key.starts_with("tileGrid-")
+                || key.starts_with("catalog-")
+                || key.starts_with("megaPaginator-");
+            if !is_search_widget {
                 continue;
             }
-
-            // The widget state can be a raw JSON string or already parsed JSON object
             let widget_obj: Value = if let Some(s) = val.as_str() {
                 serde_json::from_str(s).unwrap_or(Value::Null)
             } else {
@@ -278,9 +304,30 @@ impl OzonConnector {
         let root: Value = serde_json::from_str(json_str)
             .map_err(|e| ScraperError::Parse(format!("Failed to parse Ozon card JSON: {e}")))?;
 
+        if let Some(inc) = root
+            .get("incidentId")
+            .or_else(|| root.get("incident_id"))
+            .and_then(|v| v.as_str())
+        {
+            return Err(ScraperError::WafBlocked {
+                waf: WafProtection::Variti,
+                details: format!("Ozon security incident: {inc}"),
+            });
+        }
+
         let widgets = match root.get("widgetStates") {
             Some(Value::Object(map)) => map,
             _ => {
+                if let Some(err) = root
+                    .get("error")
+                    .or_else(|| root.get("message"))
+                    .and_then(|v| v.as_str())
+                {
+                    return Err(ScraperError::WafBlocked {
+                        waf: WafProtection::Variti,
+                        details: format!("Ozon error response: {err}"),
+                    });
+                }
                 return Err(ScraperError::NotFound {
                     query: item_id.to_string(),
                 });

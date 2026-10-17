@@ -1,19 +1,125 @@
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
-use chromiumoxide::browser::{Browser, BrowserConfig};
+use async_tungstenite::tungstenite::Message;
 use futures::StreamExt;
-use tracing::{debug, error, info, warn};
+use serde_json::{Value, json};
+use tracing::{error, info, warn};
 
 use super::cookies::SessionData;
 use crate::domain::{ScraperError, WafProtection};
+use crate::transport::DEFAULT_DESKTOP_UA as DEFAULT_USER_AGENT;
 
-const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 const DEFAULT_PROFILE_DIR: &str = "/tmp/ozon-native-cdp-profile";
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(9400);
 
-/// Pure Rust CDP solver using `chromiumoxide` to solve anti-bot challenges
-/// (Variti / Cloudflare / WAF) and harvest marketplace credentials in an isolated Xvfb framebuffer.
+fn get_available_port() -> u16 {
+    if let Ok(listener) = TcpListener::bind("127.0.0.1:0")
+        && let Ok(addr) = listener.local_addr()
+    {
+        return addr.port();
+    }
+    PORT_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+struct CdpClient {
+    child: tokio::process::Child,
+    ws: async_tungstenite::WebSocketStream<async_tungstenite::tokio::ConnectStream>,
+    session_id: String,
+    next_id: u64,
+    profile_dir: PathBuf,
+}
+
+impl CdpClient {
+    async fn send_cmd(&mut self, method: &str, params: Value) -> Result<Value, ScraperError> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let req = json!({
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        self.ws
+            .send(Message::Text(req.to_string().into()))
+            .await
+            .map_err(|e| ScraperError::Parse(format!("Failed to send CDP command: {e}")))?;
+
+        while let Some(msg) = self.ws.next().await {
+            match msg {
+                Ok(Message::Text(t)) => {
+                    if let Ok(v) = serde_json::from_str::<Value>(&t)
+                        && v.get("id").and_then(|n| n.as_u64()) == Some(id)
+                    {
+                        return Ok(v);
+                    }
+                }
+                Err(e) => {
+                    return Err(ScraperError::Parse(format!("CDP WebSocket error: {e}")));
+                }
+                _ => {}
+            }
+        }
+        Err(ScraperError::Timeout)
+    }
+
+    async fn send_session_cmd(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, ScraperError> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let req = json!({
+            "id": id,
+            "sessionId": self.session_id,
+            "method": method,
+            "params": params,
+        });
+        self.ws
+            .send(Message::Text(req.to_string().into()))
+            .await
+            .map_err(|e| ScraperError::Parse(format!("Failed to send CDP session command: {e}")))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            let next_msg = tokio::time::timeout(Duration::from_millis(1000), self.ws.next()).await;
+            match next_msg {
+                Ok(Some(Ok(Message::Text(t)))) => {
+                    if let Ok(v) = serde_json::from_str::<Value>(&t)
+                        && v.get("id").and_then(|n| n.as_u64()) == Some(id)
+                    {
+                        return Ok(v);
+                    }
+                }
+                Ok(Some(Err(e))) => {
+                    return Err(ScraperError::Parse(format!(
+                        "CDP session WebSocket error: {e}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Err(ScraperError::Timeout)
+    }
+    async fn close(mut self) {
+        let _ = self.send_cmd("Browser.close", json!({})).await;
+        let _ = tokio::time::sleep(Duration::from_millis(150)).await;
+
+        if let Some(pid) = self.child.id() {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.kill().await;
+        let _ = std::fs::remove_dir_all(&self.profile_dir);
+    }
+}
+
+/// Pure Rust CDP solver that spawns Chromium on-demand in Xvfb :99 to solve
+/// Variti Proof-of-Work and execute authenticated queries with 100% genuine Chrome TLS.
 #[derive(Debug, Clone)]
 pub struct NativeCdpSolver {
     chromium_bin: PathBuf,
@@ -67,6 +173,24 @@ impl NativeCdpSolver {
             }
         }
         PathBuf::from("chromium")
+    }
+
+    /// If path is a NixOS wrapper script, extract the real underlying Chromium binary
+    /// to bypass environment overrides (such as forced Wayland ozone hints).
+    pub fn resolve_unwrapped_binary(path: &Path) -> PathBuf {
+        if let Ok(content) = fs::read_to_string(path) {
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("exec \"")
+                    && let Some(bin_path) = rest.split('"').next()
+                {
+                    let unwrapped = PathBuf::from(bin_path);
+                    if unwrapped.is_file() {
+                        return unwrapped;
+                    }
+                }
+            }
+        }
+        path.to_path_buf()
     }
 
     /// Verify or spawn a virtual X11 display (Xvfb `:99`) to guarantee zero desktop window leaks on Wayland/Niri.
@@ -144,226 +268,155 @@ impl NativeCdpSolver {
         }
     }
 
-    /// Harvest Ozon session tokens by launching Chromium in headless Xvfb, navigating to Ozon,
+    /// Spawn an on-demand Chromium process in Xvfb :99, establish CDP WebSocket connection,
+    /// and attach to an active browser page.
+    async fn spawn_browser(&self) -> Result<CdpClient, ScraperError> {
+        let disp_str = Self::ensure_xvfb();
+        Self::clear_stale_profile_lock(&self.user_data_dir);
+        let port = get_available_port();
+
+        info!(
+            chromium = ?self.chromium_bin,
+            port = port,
+            display_server = %disp_str,
+            "Spawning on-demand Chromium for Variti PoW challenge resolution..."
+        );
+
+        let temp_profile =
+            std::env::temp_dir().join(format!("ozon-cdp-{}-{}", std::process::id(), port));
+        let user_data_str = temp_profile.to_string_lossy().to_string();
+
+        let mut cmd = tokio::process::Command::new(&self.chromium_bin);
+        cmd.args([
+            "--ozone-platform-hint=auto",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--ozone-platform=x11",
+            &format!("--user-data-dir={user_data_str}"),
+            &format!("--remote-debugging-port={port}"),
+            "about:blank",
+        ])
+        .env("DISPLAY", &disp_str)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+
+        let child = cmd.spawn().map_err(|e| {
+            error!(error = %e, "Failed to spawn Chromium process");
+            ScraperError::WafBlocked {
+                waf: WafProtection::Variti,
+                details: format!("Failed to spawn Chromium: {e}"),
+            }
+        })?;
+
+        // Poll /json/version up to 4 seconds (40 * 100ms)
+        let mut ws_url = None;
+        let version_url = format!("http://127.0.0.1:{port}/json/version");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Ok(resp) = client.get(&version_url).send().await
+                && let Ok(v) = resp.json::<Value>().await
+                && let Some(u) = v.get("webSocketDebuggerUrl").and_then(|s| s.as_str())
+            {
+                ws_url = Some(u.to_string());
+                break;
+            }
+        }
+
+        let ws_url = ws_url.ok_or_else(|| {
+            error!("Chromium failed to expose webSocketDebuggerUrl on port {port}");
+            ScraperError::WafBlocked {
+                waf: WafProtection::Variti,
+                details: format!("Chromium failed to start CDP listener on port {port}"),
+            }
+        })?;
+
+        let (ws, _) = async_tungstenite::tokio::connect_async(&ws_url)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to connect to Chromium CDP WebSocket");
+                ScraperError::WafBlocked {
+                    waf: WafProtection::Variti,
+                    details: format!("CDP WebSocket connection failed: {e}"),
+                }
+            })?;
+
+        let mut cdp = CdpClient {
+            child,
+            ws,
+            session_id: String::new(),
+            next_id: 0,
+            profile_dir: temp_profile,
+        };
+
+        // 1. Create target
+        let res = cdp
+            .send_cmd("Target.createTarget", json!({ "url": "about:blank" }))
+            .await?;
+        let target_id = res["result"]["targetId"]
+            .as_str()
+            .ok_or_else(|| {
+                ScraperError::Parse("Missing targetId in CreateTarget response".to_string())
+            })?
+            .to_string();
+
+        // 2. Attach to target
+        let res = cdp
+            .send_cmd(
+                "Target.attachToTarget",
+                json!({ "targetId": target_id, "flatten": true }),
+            )
+            .await?;
+        let session_id = res["result"]["sessionId"]
+            .as_str()
+            .ok_or_else(|| {
+                ScraperError::Parse("Missing sessionId in AttachToTarget response".to_string())
+            })?
+            .to_string();
+
+        cdp.session_id = session_id;
+
+        // 3. Page.enable
+        cdp.send_session_cmd("Page.enable", json!({})).await?;
+
+        Ok(cdp)
+    }
+
+    /// Harvest Ozon session tokens by launching Chromium on demand in Xvfb :99, navigating to Ozon,
     /// waiting for Variti anti-bot challenge to settle, and extracting cookies.
     pub async fn harvest_ozon(&self) -> Result<SessionData, ScraperError> {
-        info!(
-            chromium = ?self.chromium_bin,
-            profile = ?self.user_data_dir,
-            "Harvesting Ozon session via NativeCdpSolver (chromiumoxide)..."
-        );
+        let mut cdp = self.spawn_browser().await?;
 
-        // Strict isolation: strip Wayland display so Chromium NEVER connects to Niri
-        // In Rust 2024 edition, environment variable mutations are marked unsafe.
-        unsafe {
-            std::env::remove_var("WAYLAND_DISPLAY");
-        }
-        let display = Self::ensure_xvfb();
-        unsafe {
-            std::env::set_var("DISPLAY", &display);
-        }
-        Self::clear_stale_profile_lock(&self.user_data_dir);
+        info!("Navigating on-demand Chromium to Ozon home page to harvest tokens...");
+        cdp.send_session_cmd("Page.navigate", json!({ "url": "https://www.ozon.ru/" }))
+            .await?;
 
-        let user_data_str = self.user_data_dir.to_string_lossy().to_string();
+        info!("Waiting 10s quietly for Variti PoW calculation in native V8...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
-        let config = BrowserConfig::builder()
-            .chrome_executable(&self.chromium_bin)
-            .new_headless_mode()
-            .no_sandbox()
-            .user_data_dir(&self.user_data_dir)
-            .env("DISPLAY", &display)
-            .env("WAYLAND_DISPLAY", "")
-            .args([
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--ozone-platform=x11",
-                &format!("--user-data-dir={user_data_str}"),
-            ])
-            .build()
-            .map_err(|e| {
-                error!(error = %e, "Failed to build BrowserConfig for chromiumoxide");
-                ScraperError::WafBlocked {
-                    waf: WafProtection::Variti,
-                    details: format!("Failed to configure Chromium: {e}"),
-                }
-            })?;
+        let res = cdp
+            .send_session_cmd("Network.getCookies", json!({}))
+            .await?;
 
-        let (mut browser, mut handler) = Browser::launch(config).await.map_err(|e| {
-            error!(error = %e, "Failed to launch Chromium browser via chromiumoxide");
-            ScraperError::WafBlocked {
-                waf: WafProtection::Variti,
-                details: format!("Failed to launch Chromium: {e}"),
-            }
-        })?;
+        // Guarantee immediate process termination (Способ 2)
+        cdp.close().await;
 
-        // Spawn handler task driving WebSocket event loop
-        let handler_task = tokio::spawn(async move {
-            while let Some(event) = handler.next().await {
-                if let Err(e) = event {
-                    debug!(error = %e, "CDP handler event error");
-                    break;
+        let mut cookie_list = Vec::new();
+        if let Some(arr) = res["result"]["cookies"].as_array() {
+            for c in arr {
+                if let (Some(name), Some(val)) = (c["name"].as_str(), c["value"].as_str()) {
+                    cookie_list.push(format!("{name}={val}"));
                 }
             }
-        });
-
-        let harvest_result = self.drive_ozon_harvest(&mut browser).await;
-
-        // Ensure browser closes gracefully or gets killed
-        if let Err(e) = browser.close().await {
-            debug!(error = %e, "Browser close error or already closed");
         }
-        handler_task.abort();
-
-        harvest_result
-    }
-    /// Fetch raw JSON from Ozon Composer API through CDP in-memory page evaluation.
-    pub async fn fetch_composer(&self, url_param: &str) -> Result<String, ScraperError> {
-        info!(
-            url_param = %url_param,
-            chromium = ?self.chromium_bin,
-            profile = ?self.user_data_dir,
-            "Fetching Ozon Composer JSON via NativeCdpSolver (in-memory CDP)..."
-        );
-
-        unsafe {
-            std::env::remove_var("WAYLAND_DISPLAY");
-        }
-        let display = Self::ensure_xvfb();
-        unsafe {
-            std::env::set_var("DISPLAY", &display);
-        }
-        Self::clear_stale_profile_lock(&self.user_data_dir);
-
-        let user_data_str = self.user_data_dir.to_string_lossy().to_string();
-
-        let config = BrowserConfig::builder()
-            .chrome_executable(&self.chromium_bin)
-            .new_headless_mode()
-            .user_data_dir(&self.user_data_dir)
-            .env("DISPLAY", &display)
-            .env("WAYLAND_DISPLAY", "")
-            .args([
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--ozone-platform=x11",
-                &format!("--user-data-dir={user_data_str}"),
-            ])
-            .build()
-            .map_err(|e| {
-                error!(error = %e, "Failed to build BrowserConfig for chromiumoxide");
-                ScraperError::WafBlocked {
-                    waf: WafProtection::Variti,
-                    details: format!("Failed to configure Chromium: {e}"),
-                }
-            })?;
-
-        let (mut browser, mut handler) = Browser::launch(config).await.map_err(|e| {
-            error!(error = %e, "Failed to launch Chromium browser via chromiumoxide");
-            ScraperError::WafBlocked {
-                waf: WafProtection::Variti,
-                details: format!("Failed to launch Chromium: {e}"),
-            }
-        })?;
-
-        let handler_task = tokio::spawn(async move {
-            while let Some(event) = handler.next().await {
-                if let Err(e) = event {
-                    debug!(error = %e, "CDP handler event error");
-                    break;
-                }
-            }
-        });
-
-        let fetch_result = self.drive_composer_fetch(&mut browser, url_param).await;
-
-        if let Err(e) = browser.close().await {
-            debug!(error = %e, "Browser close error or already closed");
-        }
-        handler_task.abort();
-
-        fetch_result
-    }
-
-    async fn drive_composer_fetch(
-        &self,
-        browser: &mut Browser,
-        url_param: &str,
-    ) -> Result<String, ScraperError> {
-        let page = browser
-            .new_page("https://www.ozon.ru/")
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to open page https://www.ozon.ru/ for composer fetch");
-                ScraperError::WafBlocked {
-                    waf: WafProtection::Variti,
-                    details: format!("Failed to open Ozon page: {e}"),
-                }
-            })?;
-
-        // Wait for Variti challenge to settle and session cookies to be present
-        tokio::time::sleep(Duration::from_secs(4)).await;
-
-        let encoded_url_param =
-            serde_json::to_string(url_param).unwrap_or_else(|_| format!("\"{}\"", url_param));
-        let script = format!(
-            "() => fetch('/api/composer-api.bx/page/json/v2?url=' + encodeURIComponent({}), {{ headers: {{ accept: 'application/json' }}, credentials: 'include' }}).then(r => r.text())",
-            encoded_url_param
-        );
-
-        let json_result: String = page
-            .evaluate_function(script)
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to evaluate fetch_composer expression via CDP");
-                ScraperError::WafBlocked {
-                    waf: WafProtection::Variti,
-                    details: format!("Failed to evaluate fetch_composer script: {e}"),
-                }
-            })?
-            .into_value()
-            .map_err(|e| {
-                error!(error = %e, "Failed to deserialize fetch_composer result string");
-                ScraperError::Parse(format!("Failed to parse fetch_composer string result: {e}"))
-            })?;
-
-        Ok(json_result)
-    }
-
-    async fn drive_ozon_harvest(&self, browser: &mut Browser) -> Result<SessionData, ScraperError> {
-        let page = browser
-            .new_page("https://www.ozon.ru/")
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to open page https://www.ozon.ru/");
-                ScraperError::WafBlocked {
-                    waf: WafProtection::Variti,
-                    details: format!("Failed to open Ozon page: {e}"),
-                }
-            })?;
-
-        // Wait for Variti challenge to settle and set cookies
-        info!("Waiting 6s for Ozon Variti challenge settlement...");
-        tokio::time::sleep(Duration::from_secs(6)).await;
-
-        let cookies = page.get_cookies().await.map_err(|e| {
-            error!(error = %e, "Failed to extract cookies via CDP page.get_cookies()");
-            ScraperError::WafBlocked {
-                waf: WafProtection::Variti,
-                details: format!("Failed to extract cookies: {e}"),
-            }
-        })?;
-
-        let cookie_list: Vec<String> = cookies
-            .into_iter()
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect();
 
         if cookie_list.is_empty() {
-            error!("Zero cookies retrieved from Ozon challenge page");
             return Err(ScraperError::WafBlocked {
                 waf: WafProtection::Variti,
                 details: "No cookies collected from Ozon challenge".to_string(),
@@ -379,7 +432,7 @@ impl NativeCdpSolver {
 
         info!(
             cookie_count = cookie_list.len(),
-            "Successfully harvested Ozon session via NativeCdpSolver"
+            "Successfully harvested Ozon session via on-demand Chromium"
         );
 
         Ok(SessionData {
@@ -388,5 +441,74 @@ impl NativeCdpSolver {
             expires_at,
             user_agent: DEFAULT_USER_AGENT.to_string(),
         })
+    }
+
+    /// Fetch raw JSON from Ozon Composer API through on-demand Chromium CDP evaluation.
+    pub async fn fetch_composer(&self, url_param: &str) -> Result<String, ScraperError> {
+        let mut cdp = self.spawn_browser().await?;
+        info!("Navigating on-demand Chromium to Ozon home page...");
+        cdp.send_session_cmd("Page.navigate", json!({ "url": "https://www.ozon.ru/" }))
+            .await?;
+
+        info!("Waiting 10s quietly for Variti PoW calculation in native V8...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let encoded_url_param =
+            serde_json::to_string(url_param).unwrap_or_else(|_| format!("\"{}\"", url_param));
+
+        let expr = format!(
+            r#"fetch("/api/composer-api.bx/page/json/v2?url=" + encodeURIComponent({}), {{ headers: {{ accept: "application/json" }}, credentials: "include" }}).then(async r => ({{ status: r.status, ok: r.ok, text: await r.text() }})).catch(err => ({{ status: 0, ok: false, text: String(err) }}))"#,
+            encoded_url_param
+        );
+
+        let res = cdp
+            .send_session_cmd(
+                "Runtime.evaluate",
+                json!({
+                    "expression": expr,
+                    "awaitPromise": true,
+                    "returnByValue": true
+                }),
+            )
+            .await?;
+
+        // Guarantee immediate process termination (Способ 2)
+        cdp.close().await;
+
+        let status = res["result"]["result"]["value"]["status"]
+            .as_u64()
+            .unwrap_or(0);
+        let ok = res["result"]["result"]["value"]["ok"]
+            .as_bool()
+            .unwrap_or(false);
+        let text = res["result"]["result"]["value"]["text"]
+            .as_str()
+            .unwrap_or_default();
+
+        if !ok || status != 200 {
+            if let Ok(val) = serde_json::from_str::<Value>(text)
+                && let Some(inc) = val.get("incidentId").and_then(|v| v.as_str())
+            {
+                return Err(ScraperError::WafBlocked {
+                    waf: WafProtection::Variti,
+                    details: format!("Ozon security incident {inc} (HTTP {status})"),
+                });
+            }
+            return Err(ScraperError::WafBlocked {
+                waf: WafProtection::Variti,
+                details: format!("Composer fetch failed with HTTP status {status}"),
+            });
+        }
+
+        if let Ok(val) = serde_json::from_str::<Value>(text)
+            && let Some(inc) = val.get("incidentId").and_then(|v| v.as_str())
+        {
+            return Err(ScraperError::WafBlocked {
+                waf: WafProtection::Variti,
+                details: format!("Ozon security incident {inc}"),
+            });
+        }
+
+        Ok(text.to_string())
     }
 }

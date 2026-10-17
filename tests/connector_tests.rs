@@ -265,3 +265,70 @@ fn test_ozon_parse_card_json() {
     assert_eq!(offer.seller, Some("Intel".to_string()));
     assert_eq!(offer.stock, StockStatus::InStock(1));
 }
+
+#[test]
+fn test_ozon_parse_composer_incident_error() {
+    let incident_json = r#"{
+        "incidentId": "fab_12345_test",
+        "supportURL": "https://www.ozon.ru/complaint/support/?incident=fab_12345_test"
+    }"#;
+
+    let res = OzonConnector::parse_composer_json(incident_json, 10);
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(err.is_waf_blocked());
+}
+
+#[test]
+fn test_ozon_parse_card_incident_error() {
+    let incident_json = r#"{
+        "incidentId": "fab_99999_test",
+        "supportURL": "https://www.ozon.ru/complaint/support/?incident=fab_99999_test"
+    }"#;
+
+    let res = OzonConnector::parse_card_json(incident_json, "12345");
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(err.is_waf_blocked());
+}
+
+#[test]
+fn test_ozon_parse_composer_alternative_widget() {
+    let mock_json = r#"{
+        "widgetStates": {
+            "searchResultsV2-333-default-1": {
+                "items": [
+                    {
+                        "sku": "987654321",
+                        "action": {
+                            "link": "/product/alternative-test-item-987654321/"
+                        },
+                        "mainState": [
+                            {
+                                "type": "textDS",
+                                "id": "name",
+                                "textDS": {
+                                    "text": "Альтернативный товар"
+                                }
+                            },
+                            {
+                                "type": "priceV2",
+                                "priceV2": {
+                                    "price": [
+                                        { "text": "1 990 ₽" }
+                                    ],
+                                    "ozonCardTag": false
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }"#;
+
+    let offers = OzonConnector::parse_composer_json(mock_json, 5).unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].title, "Альтернативный товар");
+    assert_eq!(offers[0].price_tier, PriceTier::Base(1990));
+}

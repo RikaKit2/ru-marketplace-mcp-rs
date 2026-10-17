@@ -3,11 +3,11 @@ use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderName, HeaderValu
 use crate::session::SessionData;
 
 /// Default User-Agent simulating modern Chrome desktop on Linux.
-pub const DEFAULT_DESKTOP_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+pub const DEFAULT_DESKTOP_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
 /// Client Hints sec-ch-ua header.
 pub const SEC_CH_UA: &str =
-    "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"";
+    "\"Chromium\";v=\"133\", \"Google Chrome\";v=\"133\", \"Not-A.Brand\";v=\"99\"";
 
 /// Client Hints sec-ch-ua-mobile header.
 pub const SEC_CH_UA_MOBILE: &str = "?0";
@@ -18,7 +18,7 @@ pub const SEC_CH_UA_PLATFORM: &str = "\"Linux\"";
 /// Realistic Russian locale accept-language header.
 pub const ACCEPT_LANG_RU: &str = "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7";
 
-/// Construct realistic Chrome 124 Linux browser headers with Client Hints and cookies.
+/// Construct realistic Chrome 133 Linux browser headers with Client Hints and cookies.
 pub fn build_browser_headers(session: Option<&SessionData>) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
