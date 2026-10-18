@@ -70,9 +70,12 @@ pub fn parse_composer_json(
     for (key, val) in widgets {
         let is_search_widget = key.starts_with("tileGridDesktop-")
             || key.starts_with("searchResultsV2-")
+            || key.starts_with("searchResultsV3-")
+            || key.starts_with("searchMergedDesktop-")
             || key.starts_with("tileGrid-")
             || key.starts_with("catalog-")
-            || key.starts_with("megaPaginator-");
+            || key.starts_with("megaPaginator-")
+            || key.starts_with("shelf-");
         if !is_search_widget {
             continue;
         }
@@ -82,9 +85,22 @@ pub fn parse_composer_json(
             val.clone()
         };
 
-        let Some(items) = widget_obj.get("items").and_then(|v| v.as_array()) else {
-            continue;
-        };
+        // Extract items array from multiple possible keys
+        let items: Vec<&Value> =
+            if let Some(arr) = widget_obj.get("items").and_then(|v| v.as_array()) {
+                arr.iter().collect()
+            } else if let Some(arr) = widget_obj.get("products").and_then(|v| v.as_array()) {
+                arr.iter().collect()
+            } else if let Some(arr) = widget_obj.get("elements").and_then(|v| v.as_array()) {
+                arr.iter().collect()
+            } else if let Some(arr) = widget_obj
+                .get("cellTrackingInfo")
+                .and_then(|v| v.as_array())
+            {
+                arr.iter().collect()
+            } else {
+                continue;
+            };
 
         for item in items {
             if offers.len() >= limit {
@@ -135,7 +151,7 @@ fn parse_search_tile(item: &Value) -> Option<ProductOffer> {
         return None;
     };
 
-    let main_state = item.get("mainState").and_then(|v| v.as_array())?;
+    let main_state = item.get("mainState").and_then(|v| v.as_array());
 
     let mut title = String::new();
     let mut price: u64 = 0;
@@ -145,89 +161,177 @@ fn parse_search_tile(item: &Value) -> Option<ProductOffer> {
     let mut review_count: Option<u32> = None;
     let mut stock = StockStatus::Unknown;
 
-    for atom in main_state {
-        let atom_type = atom
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+    if let Some(main_state) = main_state {
+        for atom in main_state {
+            let atom_type = atom
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
 
-        match atom_type {
-            "textAtom" => {
-                let atom_obj = atom.get("textAtom").unwrap_or(atom);
-                let text = atom_obj
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
+            match atom_type {
+                "textAtom" => {
+                    let atom_obj = atom.get("textAtom").unwrap_or(atom);
+                    let text = atom_obj
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .trim();
 
-                if title.is_empty()
-                    && text.len() > 10
-                    && !text.contains('₽')
-                    && !text.contains('%')
-                    && !text.contains("балл")
-                    && !text.contains("доставк")
-                    && !text.starts_with('+')
-                {
-                    title = text.to_string();
-                }
-
-                if text.contains("отзыв") || text.contains("оцен") {
-                    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-                    if let Ok(count) = digits.parse::<u32>() {
-                        review_count = Some(count);
+                    if title.is_empty()
+                        && !text.is_empty()
+                        && !text.contains('₽')
+                        && !text.contains('%')
+                        && !text.contains("балл")
+                        && !text.contains("доставк")
+                        && !text.contains("корзин")
+                        && !text.starts_with('+')
+                    {
+                        title = text.to_string();
                     }
-                }
-            }
-            "price" | "priceV2" => {
-                let atom_obj = atom
-                    .get("price")
-                    .or_else(|| atom.get("priceV2"))
-                    .unwrap_or(atom);
 
-                if let Some(p_str) = atom_obj.get("price").and_then(|v| v.as_str())
-                    && let Some(p) = parse_price_str(p_str)
-                {
-                    price = p;
-                }
-
-                if let Some(op_str) = atom_obj.get("originalPrice").and_then(|v| v.as_str()) {
-                    price_original = parse_price_str(op_str);
-                }
-
-                if let Some(theme) = atom_obj
-                    .get("theme")
-                    .and_then(|t| t.get("textColor"))
-                    .and_then(|c| c.as_str())
-                    && (theme.contains("ozon") || theme.contains("card") || theme.contains("green"))
-                {
-                    has_card_price = true;
-                }
-
-                if let Some(card_label) = atom_obj.get("priceColor").and_then(|c| c.as_str())
-                    && (card_label.contains("green") || card_label.contains("ozon"))
-                {
-                    has_card_price = true;
-                }
-            }
-            "labelList" => {
-                let atom_obj = atom.get("labelList").unwrap_or(atom);
-                if let Some(items) = atom_obj.get("items").and_then(|i| i.as_array()) {
-                    for label in items {
-                        let text = label
-                            .get("title")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        if (text.starts_with("4.")
-                            || text.starts_with("5.")
-                            || text.starts_with("3."))
-                            && text.len() <= 4
-                            && let Ok(r) = text.parse::<f32>()
-                        {
-                            rating = Some(r);
+                    if text.contains("отзыв") || text.contains("оцен") {
+                        let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(count) = digits.parse::<u32>() {
+                            review_count = Some(count);
                         }
                     }
                 }
+                "price" | "priceV2" | "priceV3" | "splitPrice" => {
+                    let atom_obj = atom
+                        .get("price")
+                        .or_else(|| atom.get("priceV2"))
+                        .or_else(|| atom.get("priceV3"))
+                        .or_else(|| atom.get("splitPrice"))
+                        .unwrap_or(atom);
+
+                    if let Some(price_items) = atom_obj.get("price").and_then(|v| v.as_array()) {
+                        for pi in price_items {
+                            let text = pi
+                                .get("text")
+                                .or_else(|| pi.get("price"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            let theme = pi
+                                .get("theme")
+                                .or_else(|| pi.get("textColor"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+
+                            if let Some(p) = parse_price_str(text) {
+                                if price == 0 {
+                                    price = p;
+                                    if theme.contains("card")
+                                        || theme.contains("green")
+                                        || theme.contains("ozon_card")
+                                        || theme.contains("ozon")
+                                    {
+                                        has_card_price = true;
+                                    }
+                                } else if price_original.is_none() && p > price {
+                                    price_original = Some(p);
+                                }
+                            }
+                        }
+                    } else if let Some(p_str) = atom_obj.get("price").and_then(|v| v.as_str())
+                        && let Some(p) = parse_price_str(p_str)
+                    {
+                        price = p;
+                    }
+
+                    if let Some(op_str) = atom_obj.get("originalPrice").and_then(|v| v.as_str())
+                        && let Some(op) = parse_price_str(op_str)
+                    {
+                        price_original = Some(op);
+                    }
+
+                    if let Some(theme) = atom_obj
+                        .get("theme")
+                        .and_then(|t| t.get("textColor").or(Some(t)))
+                        .and_then(|c| c.as_str())
+                        && (theme.contains("ozon")
+                            || theme.contains("card")
+                            || theme.contains("green"))
+                    {
+                        has_card_price = true;
+                    }
+
+                    if let Some(card_label) = atom_obj.get("priceColor").and_then(|c| c.as_str())
+                        && (card_label.contains("green")
+                            || card_label.contains("ozon")
+                            || card_label.contains("card"))
+                    {
+                        has_card_price = true;
+                    }
+                }
+                "labelList" => {
+                    let atom_obj = atom.get("labelList").unwrap_or(atom);
+                    if let Some(items) = atom_obj.get("items").and_then(|i| i.as_array()) {
+                        for label in items {
+                            let text = label
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            if (text.starts_with("4.")
+                                || text.starts_with("5.")
+                                || text.starts_with("3."))
+                                && text.len() <= 4
+                                && let Ok(r) = text.parse::<f32>()
+                            {
+                                rating = Some(r);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+        }
+    }
+
+    // Fallback if mainState is absent or yields empty title/price: check top-level item attributes
+    if title.is_empty()
+        && let Some(t) = item
+            .get("title")
+            .or_else(|| item.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    {
+        title = t.to_string();
+    }
+
+    if price == 0 {
+        let top_price = item
+            .get("price")
+            .or_else(|| item.get("priceModel"))
+            .or_else(|| item.get("cellTrackingInfo"));
+
+        if let Some(tp) = top_price {
+            if let Some(p_str) = tp.as_str() {
+                if let Some(p) = parse_price_str(p_str) {
+                    price = p;
+                }
+            } else if let Some(p_num) = tp.as_u64() {
+                price = p_num;
+            } else if let Some(p_obj) = tp.as_object() {
+                if let Some(p) = p_obj
+                    .get("price")
+                    .or_else(|| p_obj.get("finalPrice"))
+                    .or_else(|| p_obj.get("value"))
+                {
+                    if let Some(p_str) = p.as_str() {
+                        if let Some(p_val) = parse_price_str(p_str) {
+                            price = p_val;
+                        }
+                    } else if let Some(p_num) = p.as_u64() {
+                        price = p_num;
+                    }
+                }
+                if let Some(theme) = p_obj.get("theme").and_then(|v| v.as_str())
+                    && (theme.contains("card") || theme.contains("green") || theme.contains("ozon"))
+                {
+                    has_card_price = true;
+                }
+            }
         }
     }
 

@@ -187,3 +187,40 @@ fn test_ozon_parse_composer_alternative_widget() {
     assert_eq!(offers[0].title, "Альтернативный товар");
     assert_eq!(offers[0].price_tier, PriceTier::Base(1990));
 }
+
+#[test]
+fn test_ozon_parse_composer_v3_and_merged_widgets() {
+    let mock_json = r#"{
+        "widgetStates": {
+            "searchResultsV3-39281-default-1": "{\"items\": [{\"sku\": \"3087570418\", \"action\": {\"link\": \"/product/3087570418/\"}, \"mainState\": [{\"type\": \"textAtom\", \"textAtom\": {\"text\": \"i5-14600K\"}}, {\"type\": \"priceV3\", \"priceV3\": {\"price\": [{\"text\": \"27 719 ₽\", \"theme\": \"ozon_card\"}]}}]}]}"
+        }
+    }"#;
+
+    let offers = parse_composer_json(mock_json, 10).unwrap();
+    assert_eq!(offers.len(), 1);
+    let offer = &offers[0];
+    assert_eq!(offer.title, "i5-14600K");
+    assert_eq!(offer.product_id, Some("3087570418".to_string()));
+    assert_eq!(
+        offer.price_tier,
+        PriceTier::MarketplaceCard {
+            price: 27719,
+            card: CardType::OzonCard
+        }
+    );
+}
+
+#[test]
+fn test_ozon_parse_composer_mega_paginator_nested_products() {
+    let mock_json = r#"{
+        "widgetStates": {
+            "megaPaginator-12345-default-1": "{\"products\": [{\"id\": 987654321, \"action\": {\"link\": \"/product/987654321/\"}, \"mainState\": [{\"type\": \"textAtom\", \"textAtom\": {\"text\": \"Ryzen 7 7800X3D\"}}, {\"type\": \"price\", \"price\": {\"price\": [{\"text\": \"41 490 ₽\"}]}}]}]}"
+        }
+    }"#;
+
+    let offers = parse_composer_json(mock_json, 10).unwrap();
+    assert_eq!(offers.len(), 1);
+    let offer = &offers[0];
+    assert_eq!(offer.title, "Ryzen 7 7800X3D");
+    assert_eq!(offer.price_tier, PriceTier::Base(41490));
+}

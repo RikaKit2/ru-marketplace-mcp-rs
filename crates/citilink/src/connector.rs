@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
+use scraper::{Html, Selector};
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::info;
@@ -80,6 +81,7 @@ impl CitilinkConnector {
 
         let mut offers = Vec::new();
 
+        // 1. Check window.__INITIAL_STATE__
         if let Some(script_data) =
             extract_between(content, "window.__INITIAL_STATE__ = ", ";</script>")
             && let Ok(val) = serde_json::from_str::<Value>(&script_data)
@@ -92,47 +94,201 @@ impl CitilinkConnector {
             offers.extend(parsed);
         }
 
-        if offers.is_empty() {
-            let mut search_pos = 0;
-            while let Some(start) = content[search_pos..].find("data-params='") {
-                if offers.len() >= limit {
-                    break;
-                }
-                let abs_start = search_pos + start + "data-params='".len();
-                if let Some(end) = content[abs_start..].find('\'') {
-                    let raw_json = &content[abs_start..abs_start + end];
-                    if let Ok(val) = serde_json::from_str::<Value>(raw_json) {
-                        let name = val
-                            .get("shortName")
-                            .or_else(|| val.get("name"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        let price = val.get("price").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let id = val.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-
-                        if !name.is_empty() && price > 0 {
-                            offers.push(ProductOffer {
-                                marketplace: Marketplace::Citilink,
-                                title: name.to_string(),
-                                url: format!("https://www.citilink.ru/product/{id}/"),
-                                price_tier: PriceTier::Base(price),
-                                original_price: None,
-                                currency: Currency::Rub,
-                                rating: None,
-                                review_count: None,
-                                stock: StockStatus::InStock(1),
-                                seller: Some("Citilink".to_string()),
-                                product_id: Some(id.to_string()),
-                            });
-                        }
-                    }
-                    search_pos = abs_start + end;
-                } else {
-                    break;
-                }
-            }
+        // 2. Check <script id="__NEXT_DATA__">
+        if offers.is_empty()
+            && let Some(next_data) = extract_between(
+                content,
+                "<script id=\"__NEXT_DATA__\" type=\"application/json\">",
+                "</script>",
+            )
+            && let Ok(val) = serde_json::from_str::<Value>(&next_data)
+            && let Some(products) = val
+                .pointer("/props/pageProps/initialState/products")
+                .or_else(|| val.pointer("/props/pageProps/products"))
+                .or_else(|| val.pointer("/props/pageProps/catalog/products"))
+            && let Ok(parsed) = Self::parse_json_products(products, limit)
+        {
+            offers.extend(parsed);
         }
 
+        if !offers.is_empty() {
+            return Ok(offers);
+        }
+
+        // 3. Modern HTML DOM parsing via scraper
+        let document = Html::parse_document(content);
+        let card_selector = Selector::parse(
+            "[data-meta-name='ProductCard'], [data-meta-name='SnippetProduct'], [data-meta-name='ProductCardShort'], div[data-product-id]",
+        )
+        .unwrap();
+        let title_selector = Selector::parse(
+            "a[data-meta-name$='__title'], [data-meta-name='ProductCardTitle'], a.app-catalog-link, [title]",
+        )
+        .unwrap();
+        let price_selector = Selector::parse(
+            "[data-meta-name$='__price'], [data-meta-name='ProductPrice'], span[data-meta-price], .app-catalog-price",
+        )
+        .unwrap();
+        let rating_selector = Selector::parse(
+            "[data-meta-name$='__rating'], [data-meta-name='Rating'], [data-meta-rating]",
+        )
+        .unwrap();
+        let reviews_selector =
+            Selector::parse("[data-meta-name$='__reviews'], [data-meta-name='Reviews']").unwrap();
+
+        for element in document.select(&card_selector) {
+            if offers.len() >= limit {
+                break;
+            }
+
+            // Title and URL
+            let title_elem = element.select(&title_selector).next();
+            let title = title_elem
+                .and_then(|e| {
+                    e.value()
+                        .attr("title")
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| {
+                    title_elem
+                        .map(|e| e.text().collect::<String>().trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_default();
+
+            if title.is_empty() {
+                continue;
+            }
+
+            let link = title_elem
+                .and_then(|e| e.value().attr("href"))
+                .unwrap_or_default();
+            let full_url = if link.starts_with("http") {
+                link.to_string()
+            } else if !link.is_empty() {
+                format!("https://www.citilink.ru{}", link)
+            } else {
+                String::new()
+            };
+
+            // Price
+            let price_elem = element.select(&price_selector).next();
+            let price = price_elem
+                .and_then(|e| {
+                    e.value()
+                        .attr("data-meta-price")
+                        .and_then(|p| p.parse::<u64>().ok())
+                })
+                .or_else(|| {
+                    let text = price_elem
+                        .map(|e| e.text().collect::<String>())
+                        .unwrap_or_default();
+                    Self::parse_price_str(&text)
+                });
+
+            let price = match price {
+                Some(p) if p > 0 => p,
+                _ => continue,
+            };
+
+            // Product ID
+            let product_id = element
+                .value()
+                .attr("data-meta-product-id")
+                .or_else(|| element.value().attr("data-product-id"))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    // Try extracting id from URL: /product/...-(\d+)/
+                    link.trim_end_matches('/')
+                        .split('-')
+                        .next_back()
+                        .and_then(|last| {
+                            last.chars()
+                                .all(|c| c.is_ascii_digit())
+                                .then(|| last.to_string())
+                        })
+                });
+
+            // Rating
+            let rating = element.select(&rating_selector).next().and_then(|e| {
+                e.value()
+                    .attr("data-meta-rating")
+                    .and_then(|r| r.parse::<f32>().ok())
+                    .or_else(|| {
+                        let text = e.text().collect::<String>();
+                        text.split_whitespace()
+                            .next()
+                            .and_then(|s| s.parse::<f32>().ok())
+                    })
+            });
+
+            // Review count
+            let review_count = element.select(&reviews_selector).next().and_then(|e| {
+                let text = e.text().collect::<String>();
+                let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                digits.parse::<u32>().ok()
+            });
+
+            offers.push(ProductOffer {
+                marketplace: Marketplace::Citilink,
+                title,
+                url: full_url,
+                price_tier: PriceTier::Base(price),
+                original_price: None,
+                currency: Currency::Rub,
+                rating,
+                review_count,
+                stock: StockStatus::InStock(1),
+                seller: Some("Citilink".to_string()),
+                product_id,
+            });
+        }
+
+        if !offers.is_empty() {
+            return Ok(offers);
+        }
+
+        // 4. Fallback to legacy data-params substring parsing
+        let mut search_pos = 0;
+        while let Some(start) = content[search_pos..].find("data-params='") {
+            if offers.len() >= limit {
+                break;
+            }
+            let abs_start = search_pos + start + "data-params='".len();
+            if let Some(end) = content[abs_start..].find('\'') {
+                let raw_json = &content[abs_start..abs_start + end];
+                if let Ok(val) = serde_json::from_str::<Value>(raw_json) {
+                    let name = val
+                        .get("shortName")
+                        .or_else(|| val.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let price = val.get("price").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let id = val.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+
+                    if !name.is_empty() && price > 0 {
+                        offers.push(ProductOffer {
+                            marketplace: Marketplace::Citilink,
+                            title: name.to_string(),
+                            url: format!("https://www.citilink.ru/product/{id}/"),
+                            price_tier: PriceTier::Base(price),
+                            original_price: None,
+                            currency: Currency::Rub,
+                            rating: None,
+                            review_count: None,
+                            stock: StockStatus::InStock(1),
+                            seller: Some("Citilink".to_string()),
+                            product_id: Some(id.to_string()),
+                        });
+                    }
+                }
+                search_pos = abs_start + end;
+            } else {
+                break;
+            }
+        }
         Ok(offers)
     }
 

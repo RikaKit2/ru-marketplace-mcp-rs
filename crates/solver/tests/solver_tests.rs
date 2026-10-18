@@ -89,3 +89,45 @@ async fn test_native_cdp_evaluates_simple_script() {
     handler_task.abort();
     let _ = std::fs::remove_dir_all(&temp_profile);
 }
+
+#[test]
+fn test_fetch_expression_headers() {
+    use ru_marketplace_core::domain::Marketplace;
+
+    let test_url =
+        "https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search?query=test";
+    let expr = NativeCdpSolver::build_fetch_expression(test_url);
+
+    // Verify that the JS fetch expression correctly injects headers:
+    // "x-requested-with", "XMLHttpRequest", "Accept-Language", "Accept", "credentials: \"include\""
+    assert!(expr.contains("x-requested-with"));
+    assert!(expr.contains("XMLHttpRequest"));
+    assert!(expr.contains("Accept-Language"));
+    assert!(expr.contains("ru-RU,ru;q=0.9"));
+    assert!(expr.contains("Accept"));
+    assert!(expr.contains("credentials: \"include\""));
+    assert!(expr.contains("method: \"GET\""));
+
+    // Verify origins
+    assert_eq!(
+        NativeCdpSolver::target_origin(Marketplace::Wildberries),
+        "https://www.wildberries.ru"
+    );
+    assert_eq!(
+        NativeCdpSolver::target_origin(Marketplace::Ozon),
+        "https://www.ozon.ru"
+    );
+    assert_eq!(
+        NativeCdpSolver::target_origin(Marketplace::Dns),
+        "https://www.dns-shop.ru"
+    );
+    assert_eq!(
+        NativeCdpSolver::target_origin(Marketplace::Citilink),
+        "https://www.citilink.ru"
+    );
+
+    // Verify readiness check script
+    let script = NativeCdpSolver::build_readiness_script("https://www.wildberries.ru");
+    assert!(script.contains("window.location.origin !== \"https://www.wildberries.ru\""));
+    assert!(script.contains("document.readyState === \"loading\""));
+}

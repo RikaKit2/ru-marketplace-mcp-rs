@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
+use scraper::{Html, Selector};
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::info;
@@ -90,49 +91,150 @@ impl DnsConnector {
             offers.extend(parsed);
         }
 
-        if offers.is_empty() {
-            let mut search_pos = 0;
-            while let Some(start) = content[search_pos..].find("data-product=\"") {
-                if offers.len() >= limit {
-                    break;
-                }
-                let abs_start = search_pos + start + "data-product=\"".len();
-                if let Some(end) = content[abs_start..].find('"') {
-                    let raw_json = &content[abs_start..abs_start + end];
-                    let unescaped = raw_json
-                        .replace("&quot;", "\"")
-                        .replace("&amp;", "&")
-                        .replace("&#39;", "'");
+        if !offers.is_empty() {
+            return Ok(offers);
+        }
 
-                    if let Ok(val) = serde_json::from_str::<Value>(&unescaped) {
-                        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                        let price = val.get("price").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let id = val
-                            .get("id")
-                            .or_else(|| val.get("sku"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
+        // 2. Try modern HTML DOM parsing via scraper
+        let document = Html::parse_document(content);
+        let card_selector =
+            Selector::parse(".catalog-product, .catalog-item, [data-product-id]").unwrap();
+        let title_selector = Selector::parse(
+        ".catalog-product__name, a[data-role='product-name'], .catalog-product__title, a.ui-link",
+    )
+    .unwrap();
+        let price_selector = Selector::parse(
+            ".product-buy__price_active, .product-buy__price, .catalog-product__price",
+        )
+        .unwrap();
+        let rating_selector = Selector::parse(".catalog-product__rating, [data-rating]").unwrap();
 
-                        if !name.is_empty() && price > 0 {
-                            offers.push(ProductOffer {
-                                marketplace: Marketplace::Dns,
-                                title: name.to_string(),
-                                url: format!("https://www.dns-shop.ru/product/{id}/"),
-                                price_tier: PriceTier::Base(price),
-                                original_price: None,
-                                currency: Currency::Rub,
-                                rating: None,
-                                review_count: None,
-                                stock: StockStatus::InStock(1),
-                                seller: Some("DNS".to_string()),
-                                product_id: Some(id.to_string()),
-                            });
-                        }
+        for element in document.select(&card_selector) {
+            if offers.len() >= limit {
+                break;
+            }
+
+            // Title and URL
+            let title_elem = element.select(&title_selector).next();
+            let title = title_elem
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+            if title.is_empty() {
+                continue;
+            }
+
+            let link = title_elem
+                .and_then(|e| e.value().attr("href"))
+                .unwrap_or_default();
+            let full_url = if link.starts_with("http") {
+                link.to_string()
+            } else if !link.is_empty() {
+                format!("https://www.dns-shop.ru{link}")
+            } else {
+                String::new()
+            };
+
+            // Price
+            let price_text = element
+                .select(&price_selector)
+                .next()
+                .map(|e| e.text().collect::<String>())
+                .unwrap_or_default();
+            let price = match Self::parse_price_str(&price_text) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Product ID / Code
+            let product_id = element
+                .value()
+                .attr("data-product")
+                .or_else(|| element.value().attr("data-code"))
+                .or_else(|| element.value().attr("data-product-id"))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    // Try extracting id from url: /product/(\d+)/
+                    link.split("/product/")
+                        .nth(1)
+                        .and_then(|rest| rest.split('/').next())
+                        .map(|id| id.to_string())
+                });
+
+            // Rating
+            let rating = element.select(&rating_selector).next().and_then(|e| {
+                e.value()
+                    .attr("data-rating")
+                    .and_then(|r| r.parse::<f32>().ok())
+                    .or_else(|| {
+                        let text = e.text().collect::<String>();
+                        text.split_whitespace()
+                            .next()
+                            .and_then(|s| s.parse::<f32>().ok())
+                    })
+            });
+
+            offers.push(ProductOffer {
+                marketplace: Marketplace::Dns,
+                title,
+                url: full_url,
+                price_tier: PriceTier::Base(price),
+                original_price: None,
+                currency: Currency::Rub,
+                rating,
+                review_count: None,
+                stock: StockStatus::InStock(1),
+                seller: Some("DNS".to_string()),
+                product_id,
+            });
+        }
+
+        if !offers.is_empty() {
+            return Ok(offers);
+        }
+
+        // 3. Fallback to legacy data-product JSON substring parsing
+        let mut search_pos = 0;
+        while let Some(start) = content[search_pos..].find("data-product=\"") {
+            if offers.len() >= limit {
+                break;
+            }
+            let abs_start = search_pos + start + "data-product=\"".len();
+            if let Some(end) = content[abs_start..].find('"') {
+                let raw_json = &content[abs_start..abs_start + end];
+                let unescaped = raw_json
+                    .replace("&quot;", "\"")
+                    .replace("&amp;", "&")
+                    .replace("&#39;", "'");
+
+                if let Ok(val) = serde_json::from_str::<Value>(&unescaped) {
+                    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                    let price = val.get("price").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let id = val
+                        .get("id")
+                        .or_else(|| val.get("sku"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+
+                    if !name.is_empty() && price > 0 {
+                        offers.push(ProductOffer {
+                            marketplace: Marketplace::Dns,
+                            title: name.to_string(),
+                            url: format!("https://www.dns-shop.ru/product/{id}/"),
+                            price_tier: PriceTier::Base(price),
+                            original_price: None,
+                            currency: Currency::Rub,
+                            rating: None,
+                            review_count: None,
+                            stock: StockStatus::InStock(1),
+                            seller: Some("DNS".to_string()),
+                            product_id: Some(id.to_string()),
+                        });
                     }
-                    search_pos = abs_start + end;
-                } else {
-                    break;
                 }
+                search_pos = abs_start + end;
+            } else {
+                break;
             }
         }
 

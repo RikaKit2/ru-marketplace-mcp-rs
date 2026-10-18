@@ -19,10 +19,13 @@
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
 
+            nativeBuildInputs = [ pkgs.cacert ];
+
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
             preBuild = ''
               rm -rf .cargo
             '';
-
             meta = {
               description = "Russian Marketplaces Price Comparison & MCP Server";
               mainProgram = "ru-marketplace-mcp";

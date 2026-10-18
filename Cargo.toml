@@ -37,3 +37,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 async-tungstenite = { version = "0.32.1", features = ["tokio-runtime"] }
 libc = "0.2"
 chromiumoxide = { version = "0.9.1", default-features = false, features = ["bytes"] }
+scraper = "0.23.1"

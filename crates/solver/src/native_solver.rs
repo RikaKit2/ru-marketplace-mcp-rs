@@ -494,7 +494,7 @@ impl NativeCdpSolver {
             .create_and_attach_tab("https://www.wildberries.ru/")
             .await?;
         tabs.insert(Marketplace::Wildberries, wb_session_id);
-
+        tokio::time::sleep(Duration::from_millis(1500)).await;
         *session_guard = Some(ActiveSession {
             cdp,
             tabs,
@@ -535,6 +535,38 @@ impl NativeCdpSolver {
             Ok("No active browser session to stop.".to_string())
         }
     }
+    /// Generate standard JS fetch expression with browser headers and credentials.
+    pub fn build_fetch_expression(fetch_url: &str) -> String {
+        let encoded_url =
+            serde_json::to_string(fetch_url).unwrap_or_else(|_| format!("\"{}\"", fetch_url));
+        format!(
+            r#"fetch({}, {{ method: "GET", headers: {{ "Accept": "*/*", "Accept-Language": "ru-RU,ru;q=0.9", "x-requested-with": "XMLHttpRequest" }}, credentials: "include" }}).then(async r => ({{ status: r.status, ok: r.ok, text: await r.text() }})).catch(err => ({{ status: 0, ok: false, text: String(err) }}))"#,
+            encoded_url
+        )
+    }
+
+    /// Determine target origin URL based on marketplace.
+    pub fn target_origin(marketplace: Marketplace) -> &'static str {
+        match marketplace {
+            Marketplace::Ozon => "https://www.ozon.ru",
+            Marketplace::Wildberries => "https://www.wildberries.ru",
+            Marketplace::Dns => "https://www.dns-shop.ru",
+            Marketplace::Citilink => "https://www.citilink.ru",
+            _ => "",
+        }
+    }
+
+    /// Generate readiness check script verifying tab origin and document readyState.
+    pub fn build_readiness_script(target_origin: &str) -> String {
+        format!(
+            r#"(() => {{
+    if (window.location.origin !== "{}") return false;
+    if (document.readyState === "loading") return false;
+    return true;
+}})()"#,
+            target_origin
+        )
+    }
 
     /// Execute a JSON fetch expression inside the appropriate marketplace tab.
     pub async fn fetch_in_tab(
@@ -542,13 +574,9 @@ impl NativeCdpSolver {
         marketplace: Marketplace,
         fetch_url: &str,
     ) -> Result<String, ScraperError> {
-        let encoded_url =
-            serde_json::to_string(fetch_url).unwrap_or_else(|_| format!("\"{}\"", fetch_url));
-
-        let expr = format!(
-            r#"fetch({}, {{ headers: {{ accept: "application/json" }}, credentials: "include" }}).then(async r => ({{ status: r.status, ok: r.ok, text: await r.text() }})).catch(err => ({{ status: 0, ok: false, text: String(err) }}))"#,
-            encoded_url
-        );
+        let expr = Self::build_fetch_expression(fetch_url);
+        let origin = Self::target_origin(marketplace);
+        let readiness_script = Self::build_readiness_script(origin);
 
         // 1. Try persistent session
         {
@@ -572,6 +600,30 @@ impl NativeCdpSolver {
                         new_id
                     }
                 };
+
+                // Poll readiness check script up to 3000ms (every 200ms) before evaluating fetch()
+                if !origin.is_empty() {
+                    let deadline = std::time::Instant::now() + Duration::from_millis(3000);
+                    while std::time::Instant::now() < deadline {
+                        let check = session
+                            .cdp
+                            .send_target_cmd(
+                                &tab_session_id,
+                                "Runtime.evaluate",
+                                json!({
+                                    "expression": readiness_script,
+                                    "returnByValue": true
+                                }),
+                            )
+                            .await;
+                        if let Ok(val) = check
+                            && val["result"]["result"]["value"].as_bool() == Some(true)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
 
                 let res = session
                     .cdp
@@ -618,6 +670,29 @@ impl NativeCdpSolver {
         if marketplace == Marketplace::Ozon {
             info!("Waiting 10s quietly for Variti PoW calculation on on-demand launch...");
             tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+
+        // Poll readiness check script up to 3000ms (every 200ms) before evaluating fetch()
+        if !origin.is_empty() {
+            let deadline = std::time::Instant::now() + Duration::from_millis(3000);
+            while std::time::Instant::now() < deadline {
+                let check = cdp
+                    .send_target_cmd(
+                        &session_id,
+                        "Runtime.evaluate",
+                        json!({
+                            "expression": readiness_script,
+                            "returnByValue": true
+                        }),
+                    )
+                    .await;
+                if let Ok(val) = check
+                    && val["result"]["result"]["value"].as_bool() == Some(true)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
         }
 
         let res = cdp
