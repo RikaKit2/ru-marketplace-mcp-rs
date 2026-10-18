@@ -103,7 +103,13 @@ impl CitilinkConnector {
             )
             && let Ok(val) = serde_json::from_str::<Value>(&next_data)
             && let Some(products) = val
-                .pointer("/props/pageProps/initialState/products")
+                .pointer("/props/pageProps/initialState/subcategory/productList/payload/products")
+                .or_else(|| {
+                    val.pointer(
+                        "/props/pageProps/initialState/searchPage/productList/payload/products",
+                    )
+                })
+                .or_else(|| val.pointer("/props/pageProps/initialState/products"))
                 .or_else(|| val.pointer("/props/pageProps/products"))
                 .or_else(|| val.pointer("/props/pageProps/catalog/products"))
             && let Ok(parsed) = Self::parse_json_products(products, limit)
@@ -118,23 +124,23 @@ impl CitilinkConnector {
         // 3. Modern HTML DOM parsing via scraper
         let document = Html::parse_document(content);
         let card_selector = Selector::parse(
-            "[data-meta-name='ProductCard'], [data-meta-name='SnippetProduct'], [data-meta-name='ProductCardShort'], div[data-product-id]",
+            "[data-meta-name='ProductCard'], [data-meta-name='SnippetProduct'], [data-meta-name='ProductCardShort'], [data-meta-name='ProductVerticalSnippet'], [data-meta-name='ProductHorizontalSnippet'], [data-meta-name='SnippetProductVerticalLayout'], div[data-product-id]",
         )
         .unwrap();
         let title_selector = Selector::parse(
-            "a[data-meta-name$='__title'], [data-meta-name='ProductCardTitle'], a.app-catalog-link, [title]",
+            "a[data-meta-name$='__title'], [data-meta-name='Snippet__title'], [data-meta-name='ProductCardTitle'], a.app-catalog-link, [title]",
         )
         .unwrap();
         let price_selector = Selector::parse(
-            "[data-meta-name$='__price'], [data-meta-name='ProductPrice'], span[data-meta-price], .app-catalog-price",
+            "[data-meta-name$='__price'], [data-meta-name='Snippet__price'], [data-meta-name='ProductPrice'], span[data-meta-price], .app-catalog-price",
         )
         .unwrap();
         let rating_selector = Selector::parse(
-            "[data-meta-name$='__rating'], [data-meta-name='Rating'], [data-meta-rating]",
+            "[data-meta-name$='__rating'], [data-meta-name='MetaInfo_rating'], [data-meta-name='Rating'], [data-meta-rating]",
         )
         .unwrap();
         let reviews_selector =
-            Selector::parse("[data-meta-name$='__reviews'], [data-meta-name='Reviews']").unwrap();
+            Selector::parse("[data-meta-name$='__reviews'], [data-meta-name='MetaInfo_opinionsCount'], [data-meta-name='Reviews']").unwrap();
 
         for element in document.select(&card_selector) {
             if offers.len() >= limit {
@@ -162,7 +168,13 @@ impl CitilinkConnector {
             }
 
             let link = title_elem
-                .and_then(|e| e.value().attr("href"))
+                .and_then(|e| {
+                    e.value().attr("href").map(|s| s.to_string()).or_else(|| {
+                        e.select(&Selector::parse("a").unwrap())
+                            .next()
+                            .and_then(|a| a.value().attr("href").map(|s| s.to_string()))
+                    })
+                })
                 .unwrap_or_default();
             let full_url = if link.starts_with("http") {
                 link.to_string()

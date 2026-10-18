@@ -12,7 +12,7 @@ use ru_marketplace_solver::NativeCdpSolver;
 use super::basket::BasketResolver;
 use super::parser::parse_products_json;
 
-pub const WB_DEFAULT_DEST: &str = "-1257786";
+pub const WB_DEFAULT_DEST: &str = "1259570991";
 pub const WB_SEARCH_URL: &str =
     "https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search";
 pub const WB_CARD_URL: &str = "https://card.wb.ru/cards/v4/detail";

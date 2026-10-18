@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-citilink"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-dns"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-mcp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -1631,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-ozon"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-solver"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "async-tungstenite",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-wb"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "futures",

@@ -157,7 +157,8 @@ async fn test_mcp_tools_list_schema_filters() {
     assert!(props.get("min_price").is_some());
     assert!(props.get("max_price").is_some());
     assert!(props.get("sort").is_some());
-
+    assert!(props.get("marketplace").is_some());
+    assert!(props.get("marketplaces").is_some());
     let sort_enum = props
         .get("sort")
         .unwrap()
@@ -168,6 +169,37 @@ async fn test_mcp_tools_list_schema_filters() {
 
     assert!(sort_enum.contains(&json!("price_asc")));
     assert!(sort_enum.contains(&json!("reviews")));
+}
+
+#[tokio::test]
+async fn test_mcp_compare_prices_marketplace_validation() {
+    let server = McpServer::new();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(99)),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "compare_prices",
+            "arguments": {
+                "query": "ноутбук",
+                "marketplace": "invalid_market"
+            }
+        })),
+    };
+
+    let resp = server.handle_request(req).await.expect("Expected response");
+    let result = resp.result.expect("Expected result");
+    assert_eq!(result.get("isError"), Some(&json!(true)));
+    let content = result.get("content").unwrap().as_array().unwrap();
+    assert!(
+        content[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("Invalid marketplace")
+    );
 }
 
 #[tokio::test]

@@ -3,3 +3,14 @@ result
 result-*
 *.swp
 *~
+
+# Session caches and harvested cookies
+cookies.json
+*.cookies
+.cache/
+
+# Local secrets and environment files
+.env
+.env.*
+*.pem
+*.key

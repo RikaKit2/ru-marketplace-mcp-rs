@@ -11,7 +11,7 @@ use async_tungstenite::tungstenite::Message;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use ru_marketplace_core::domain::{Marketplace, ScraperError, WafProtection};
 use ru_marketplace_core::session::{SessionData, SessionSolver, SessionStatusInfo};
@@ -165,6 +165,18 @@ struct ActiveSession {
     cdp: CdpClient,
     tabs: HashMap<Marketplace, String>,
     last_used: std::time::Instant,
+}
+/// Stage of a web page being solved via Chromium DevTools Protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageStage {
+    /// Challenge script is actively executing in V8 (Qrator/Variti/Cloudflare)
+    ChallengeActive,
+    /// Navigation / DOM is still loading or blank redirect
+    Navigating,
+    /// Catalog content, search products, or empty results indicator is rendered
+    Ready,
+    /// Permanent block error page (403, Access Denied)
+    Blocked,
 }
 
 /// Unified multi-tab Chromium solver on Xvfb :99.
@@ -362,6 +374,7 @@ impl NativeCdpSolver {
                 "--ozone-platform-hint=auto",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--ignore-certificate-errors",
                 "--ozone-platform=x11",
                 &format!("--user-data-dir={user_data_str}"),
                 &format!("--remote-debugging-port={port}"),
@@ -389,6 +402,7 @@ impl NativeCdpSolver {
                 "--headless=new",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--ignore-certificate-errors",
                 &format!("--user-data-dir={user_data_str}"),
                 &format!("--remote-debugging-port={port}"),
                 "about:blank",
@@ -405,6 +419,7 @@ impl NativeCdpSolver {
                 "--headless=new",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--ignore-certificate-errors",
                 &format!("--user-data-dir={user_data_str}"),
                 &format!("--remote-debugging-port={port}"),
                 "about:blank",
@@ -535,12 +550,114 @@ impl NativeCdpSolver {
             Ok("No active browser session to stop.".to_string())
         }
     }
+    /// Generate JavaScript expression to inspect page stage: Ready, ChallengeActive, Navigating, or Blocked.
+    pub fn build_stage_detection_script() -> &'static str {
+        r#"(() => {
+    const readyState = document.readyState;
+    if (readyState !== "complete") {
+        return "navigating";
+    }
+    const html = document.body ? document.body.innerHTML : "";
+    const title = document.title || "";
+
+    // 1. Permanent block / WAF rejection
+    if (title.includes("Access Denied") || title.includes("403 Forbidden") || html.includes("Access denied") || html.includes("Доступ ограничен")) {
+        return "blocked";
+    }
+
+    // 2. Active challenge indicators
+    if (html.includes("qrator_js") || html.includes("Checking your browser") || html.includes("challenge-platform") || html.includes("PowChallenge") || html.includes("ddos-guard")) {
+        return "challenge_active";
+    }
+
+    // 3. Ready catalog elements across supported marketplaces
+    if (document.querySelector(".catalog-product, .catalog-item, [data-product-id], .products-list, [data-meta-name='ProductVerticalSnippet'], [data-meta-name='ProductHorizontalSnippet'], [data-meta-name='ProductCard'], .empty-search-results, .null-result, .search-empty")) {
+        return "ready";
+    }
+
+    // 4. Substantial rendered DOM without challenge indicators
+    if (html.length > 50000 && !html.includes("loading")) {
+        return "ready";
+    }
+
+    return "navigating";
+})()"#
+    }
+
+    /// Wait adaptively for a page to transition from challenge/navigating to ready or blocked.
+    /// Employs a sliding activity window: keeps waiting as long as challenge/navigation heartbeat is active,
+    /// exiting immediately upon `Ready` or `Blocked`, with an absolute safety ceiling of 30 seconds.
+    async fn wait_for_page_ready(
+        cdp: &mut CdpClient,
+        tab_session_id: &str,
+    ) -> Result<PageStage, ScraperError> {
+        let absolute_ceiling = Duration::from_secs(30);
+        let idle_threshold = Duration::from_millis(3000);
+        let start = std::time::Instant::now();
+        let mut last_activity = std::time::Instant::now();
+        let script = Self::build_stage_detection_script();
+
+        while start.elapsed() < absolute_ceiling {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let check = cdp
+                .send_target_cmd(
+                    tab_session_id,
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": script,
+                        "returnByValue": true
+                    }),
+                )
+                .await;
+
+            if let Ok(val) = check
+                && let Some(stage_str) = val["result"]["result"]["value"].as_str()
+            {
+                match stage_str {
+                    "ready" => {
+                        debug!("PageStage::Ready reached in {:?}", start.elapsed());
+                        return Ok(PageStage::Ready);
+                    }
+                    "challenge_active" => {
+                        last_activity = std::time::Instant::now();
+                        debug!(
+                            "PageStage::ChallengeActive in progress ({:?} elapsed)...",
+                            start.elapsed()
+                        );
+                    }
+                    "navigating" => {
+                        last_activity = std::time::Instant::now();
+                        debug!("PageStage::Navigating ({:?} elapsed)...", start.elapsed());
+                    }
+                    "blocked" => {
+                        warn!("PageStage::Blocked encountered: Access Denied");
+                        return Ok(PageStage::Blocked);
+                    }
+                    _ => {
+                        if last_activity.elapsed() >= idle_threshold {
+                            debug!(
+                                "Idle threshold reached ({:?}), proceeding to extraction",
+                                start.elapsed()
+                            );
+                            return Ok(PageStage::Ready);
+                        }
+                    }
+                }
+            } else if last_activity.elapsed() >= idle_threshold {
+                break;
+            }
+        }
+
+        Ok(PageStage::Ready)
+    }
+
     /// Generate standard JS fetch expression with browser headers and credentials.
     pub fn build_fetch_expression(fetch_url: &str) -> String {
         let encoded_url =
             serde_json::to_string(fetch_url).unwrap_or_else(|_| format!("\"{}\"", fetch_url));
         format!(
-            r#"fetch({}, {{ method: "GET", headers: {{ "Accept": "*/*", "Accept-Language": "ru-RU,ru;q=0.9", "x-requested-with": "XMLHttpRequest" }}, credentials: "include" }}).then(async r => ({{ status: r.status, ok: r.ok, text: await r.text() }})).catch(err => ({{ status: 0, ok: false, text: String(err) }}))"#,
+            r#"fetch({}, {{ method: "GET", headers: {{ "Accept": "*/*", "Accept-Language": "ru-RU,ru;q=0.9", "x-requested-with": "XMLHttpRequest", "x-spa-version": "14.28.4" }}, credentials: "include" }}).then(async r => ({{ status: r.status, ok: r.ok, text: await r.text() }})).catch(err => ({{ status: 0, ok: false, text: String(err) }}))"#,
             encoded_url
         )
     }
@@ -757,33 +874,12 @@ impl NativeCdpSolver {
                 .send_target_cmd(&tab_session_id, "Page.navigate", json!({ "url": page_url }))
                 .await;
 
-            let deadline = std::time::Instant::now() + Duration::from_secs(6);
-            while std::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let check = session
-                    .cdp
-                    .send_target_cmd(
-                        &tab_session_id,
-                        "Runtime.evaluate",
-                        json!({
-                            "expression": r#"(() => {
-                                if (document.readyState !== "complete") return false;
-                                const html = document.body ? document.body.innerHTML : "";
-                                if (html.includes("qrator_js") || html.includes("Checking your browser") || html.includes("challenge-platform")) {
-                                    return false;
-                                }
-                                return true;
-                            })()"#,
-                            "returnByValue": true
-                        }),
-                    )
-                    .await;
-
-                if let Ok(val) = check
-                    && val["result"]["result"]["value"].as_bool() == Some(true)
-                {
-                    break;
-                }
+            let stage = Self::wait_for_page_ready(&mut session.cdp, &tab_session_id).await?;
+            if stage == PageStage::Blocked {
+                return Err(ScraperError::WafBlocked {
+                    waf: WafProtection::Kasada,
+                    details: format!("Access denied on {page_url}"),
+                });
             }
 
             let res = session
@@ -811,32 +907,13 @@ impl NativeCdpSolver {
         let mut cdp = self.spawn_browser().await?;
         let tab_session_id = cdp.create_and_attach_tab(page_url).await?;
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(6);
-        while std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let check = cdp
-                .send_target_cmd(
-                    &tab_session_id,
-                    "Runtime.evaluate",
-                    json!({
-                        "expression": r#"(() => {
-                            if (document.readyState !== "complete") return false;
-                            const html = document.body ? document.body.innerHTML : "";
-                            if (html.includes("qrator_js") || html.includes("Checking your browser") || html.includes("challenge-platform")) {
-                                return false;
-                            }
-                            return true;
-                        })()"#,
-                        "returnByValue": true
-                    }),
-                )
-                .await;
-
-            if let Ok(val) = check
-                && val["result"]["result"]["value"].as_bool() == Some(true)
-            {
-                break;
-            }
+        let stage = Self::wait_for_page_ready(&mut cdp, &tab_session_id).await?;
+        if stage == PageStage::Blocked {
+            cdp.close().await;
+            return Err(ScraperError::WafBlocked {
+                waf: WafProtection::Kasada,
+                details: format!("Access denied on {page_url}"),
+            });
         }
 
         let res = cdp

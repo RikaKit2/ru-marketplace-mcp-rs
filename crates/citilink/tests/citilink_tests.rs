@@ -111,3 +111,77 @@ fn test_citilink_parse_next_data_script() {
     assert_eq!(offers[0].price_tier, PriceTier::Base(5490));
     assert_eq!(offers[0].product_id, Some("1892831".to_string()));
 }
+
+#[test]
+fn test_citilink_parse_vertical_snippet_html() {
+    let html = r#"
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <div data-meta-name="ProductVerticalSnippet">
+            <div data-meta-name="Snippet__title">
+                <a href="/product/noutbuk-chuwi-corebook-x-ryzen-5-5500u-16gb-ssd512gb-vega-7-14-2k-w11h-2174077/">
+                    Ноутбук CHUWI Corebook X, 14", IPS, AMD Ryzen 5 5500U, серый
+                </a>
+            </div>
+            <div data-meta-name="Snippet__price">47 990₽</div>
+            <div data-meta-name="MetaInfo_rating">4.8</div>
+            <div data-meta-name="MetaInfo_opinionsCount">12 отзывов</div>
+        </div>
+    </body>
+    </html>
+    "#;
+
+    let offers = CitilinkConnector::parse_catalog_data(html, 10).unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].marketplace, Marketplace::Citilink);
+    assert_eq!(
+        offers[0].title,
+        "Ноутбук CHUWI Corebook X, 14\", IPS, AMD Ryzen 5 5500U, серый"
+    );
+    assert_eq!(offers[0].price_tier, PriceTier::Base(47990));
+    assert_eq!(offers[0].product_id, Some("2174077".to_string()));
+    assert_eq!(offers[0].rating, Some(4.8));
+    assert_eq!(offers[0].review_count, Some(12));
+}
+
+#[test]
+fn test_citilink_parse_next_data_subcategory_payload() {
+    let html = r#"
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <script id="__NEXT_DATA__" type="application/json">
+        {
+            "props": {
+                "pageProps": {
+                    "initialState": {
+                        "subcategory": {
+                            "productList": {
+                                "payload": {
+                                    "products": [
+                                        {
+                                            "id": "2174077",
+                                            "name": "Ноутбук CHUWI Corebook X",
+                                            "price": 47990,
+                                            "url": "/product/noutbuk-chuwi-corebook-x-2174077/"
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        </script>
+    </body>
+    </html>
+    "#;
+
+    let offers = CitilinkConnector::parse_catalog_data(html, 10).unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].title, "Ноутбук CHUWI Corebook X");
+    assert_eq!(offers[0].price_tier, PriceTier::Base(47990));
+    assert_eq!(offers[0].product_id, Some("2174077".to_string()));
+}

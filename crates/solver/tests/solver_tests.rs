@@ -131,3 +131,21 @@ fn test_fetch_expression_headers() {
     assert!(script.contains("window.location.origin !== \"https://www.wildberries.ru\""));
     assert!(script.contains("document.readyState === \"loading\""));
 }
+
+#[test]
+fn test_stage_detection_script_and_page_stages() {
+    use ru_marketplace_solver::PageStage;
+
+    let script = NativeCdpSolver::build_stage_detection_script();
+    assert!(script.contains("challenge_active"));
+    assert!(script.contains("navigating"));
+    assert!(script.contains("ready"));
+    assert!(script.contains("blocked"));
+    assert!(script.contains("qrator_js"));
+    assert!(script.contains(".catalog-product"));
+    assert!(script.contains("ProductVerticalSnippet"));
+
+    assert_eq!(PageStage::Ready, PageStage::Ready);
+    assert_ne!(PageStage::Ready, PageStage::ChallengeActive);
+    assert_ne!(PageStage::Navigating, PageStage::Blocked);
+}

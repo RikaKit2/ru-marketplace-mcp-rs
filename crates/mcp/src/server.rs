@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
@@ -196,6 +197,15 @@ impl McpServer {
                         "query": {
                             "type": "string",
                             "description": "Russian search text, e.g. 'iphone 15 128' or 'стиральная машина узкая'"
+                        },
+                        "marketplace": {
+                            "type": "string",
+                            "description": "Optional single marketplace filter (wildberries, ozon, dns, citilink)"
+                        },
+                        "marketplaces": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of marketplaces to search (e.g. ['wildberries', 'ozon'])"
                         },
                         "limit": {
                             "type": "integer",
@@ -474,9 +484,37 @@ impl McpServer {
                 if query.trim().is_empty() {
                     return McpCallResult::error("Argument 'query' must not be empty");
                 }
+                let filter_sources = if let Some(m_str) = args
+                    .get("marketplace")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    match Marketplace::from_str(m_str) {
+                        Ok(m) => Some(vec![m]),
+                        Err(e) => return McpCallResult::error(format!("Invalid marketplace: {e}")),
+                    }
+                } else if let Some(arr) = args.get("marketplaces").and_then(|v| v.as_array()) {
+                    let mut list = Vec::new();
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            match Marketplace::from_str(s) {
+                                Ok(m) => list.push(m),
+                                Err(e) => {
+                                    return McpCallResult::error(format!(
+                                        "Invalid marketplace: {e}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    if list.is_empty() { None } else { Some(list) }
+                } else {
+                    None
+                };
+
                 let result = self
                     .aggregator
-                    .compare_prices(query, limit, None, Some(&filters))
+                    .compare_prices(query, limit, filter_sources.as_deref(), Some(&filters))
                     .await;
                 match serde_json::to_string_pretty(&result) {
                     Ok(text) => McpCallResult::text(text),

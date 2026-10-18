@@ -96,22 +96,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Running price comparison for query: '{query}'");
         let server = McpServer::new();
 
-        let _filter_marketplace = if let Some(m_str) = cli.marketplace {
-            match Marketplace::from_str(&m_str) {
-                Ok(m) => Some(vec![m]),
-                Err(err) => {
-                    error!("{err}");
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            None
-        };
-
-        let args = serde_json::json!({
+        let mut args = serde_json::json!({
             "query": query,
             "limit": cli.limit,
         });
+
+        if let Some(m_str) = &cli.marketplace {
+            if let Err(err) = Marketplace::from_str(m_str) {
+                error!("{err}");
+                std::process::exit(1);
+            }
+            args["marketplace"] = serde_json::json!(m_str);
+        }
 
         let result = server.call_tool("compare_prices", &args).await;
         if let Some(c) = result.content.first() {
