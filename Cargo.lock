@@ -1561,8 +1561,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ru-marketplace-aliexpress"
+version = "0.2.4"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "ru-marketplace-core",
+ "ru-marketplace-solver",
+ "scraper",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ru-marketplace-citilink"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -1579,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1592,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-dns"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -1609,17 +1625,19 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-mcp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "clap",
  "futures",
  "reqwest",
+ "ru-marketplace-aliexpress",
  "ru-marketplace-citilink",
  "ru-marketplace-core",
  "ru-marketplace-dns",
  "ru-marketplace-ozon",
  "ru-marketplace-solver",
+ "ru-marketplace-taobao",
  "ru-marketplace-wb",
  "ru-marketplace-yandex",
  "serde",
@@ -1632,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-ozon"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -1648,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-solver"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "async-tungstenite",
@@ -1665,8 +1683,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ru-marketplace-taobao"
+version = "0.2.4"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "ru-marketplace-core",
+ "ru-marketplace-solver",
+ "scraper",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ru-marketplace-wb"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -1682,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-yandex"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "futures",

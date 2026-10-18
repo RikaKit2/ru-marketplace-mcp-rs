@@ -4,7 +4,11 @@ use ru_marketplace_core::domain::{
     Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus,
 };
 
-use crate::models::{WbReviewItem, WbReviewsResponse, WbRootInfo, WbSellerInfo};
+use std::collections::VecDeque;
+
+use crate::models::{
+    WbCategoriesResponse, WbCategoryNode, WbReviewItem, WbReviewsResponse, WbRootInfo, WbSellerInfo,
+};
 
 /// Best-effort decode of double-encoded UTF-8 strings.
 /// If a string was encoded as UTF-8, then erroneously decoded as ISO-8859-1 / Latin-1,
@@ -443,6 +447,200 @@ pub fn parse_seller_info_json(
         legal_address,
         trademark,
         kpp,
+        host_used,
+    })
+}
+
+/// Maximum number of category nodes to traverse and return in one request.
+pub const WB_MENU_MAX_NODES: usize = 400;
+
+/// Breadth-first search for a category subtree by name, URL, or ID.
+pub fn find_menu_subtree<'a>(nodes: &'a [Value], needle: &str) -> Option<&'a Value> {
+    let needle_low = needle.trim().to_lowercase();
+    if needle_low.is_empty() {
+        return None;
+    }
+    let needle_trimmed = needle_low.trim_matches('/');
+    let mut queue: VecDeque<&'a Value> = nodes.iter().collect();
+
+    while let Some(node) = queue.pop_front() {
+        let Some(obj) = node.as_object() else {
+            continue;
+        };
+        let raw_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        let name = decode_mojibake(raw_name).trim().to_lowercase();
+        let url = obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase();
+        let url_trimmed = url.trim_matches('/');
+        let node_id = obj
+            .get("id")
+            .and_then(|v| {
+                if let Some(n) = v.as_u64() {
+                    Some(n.to_string())
+                } else if let Some(n) = v.as_i64() {
+                    Some(n.to_string())
+                } else {
+                    v.as_str().map(|s| s.trim().to_string())
+                }
+            })
+            .unwrap_or_default();
+
+        if needle_low == name
+            || needle_low == url
+            || needle_low == node_id
+            || (!needle_trimmed.is_empty() && url_trimmed.ends_with(needle_trimmed))
+            || url.ends_with(&format!("/{needle_low}"))
+        {
+            return Some(node);
+        }
+
+        if let Some(children) = obj.get("childs").and_then(|v| v.as_array()) {
+            for child in children {
+                queue.push_back(child);
+            }
+        }
+    }
+
+    None
+}
+
+/// Convert a raw menu JSON node into a bounded `WbCategoryNode`.
+pub fn build_menu_node(
+    raw: &Value,
+    depth: usize,
+    budget: &mut usize,
+    max_depth: usize,
+) -> Option<WbCategoryNode> {
+    if *budget == 0 {
+        return None;
+    }
+    let obj = raw.as_object()?;
+    *budget -= 1;
+
+    let children_slice = obj
+        .get("childs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    let children_count = children_slice.len();
+
+    let mut children = Vec::new();
+    if depth < max_depth {
+        for child in children_slice {
+            if let Some(child_node) = build_menu_node(child, depth + 1, budget, max_depth) {
+                children.push(child_node);
+            } else {
+                break;
+            }
+        }
+    }
+
+    let id = obj.get("id").and_then(|v| {
+        v.as_u64()
+            .or_else(|| {
+                v.as_i64()
+                    .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+            })
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+    });
+    let raw_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+    let name = decode_mojibake(raw_name);
+    let url = obj
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let shard = obj
+        .get("shard")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let query = obj
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Some(WbCategoryNode {
+        id,
+        name,
+        url,
+        shard,
+        query,
+        depth,
+        children_count,
+        childs: children,
+    })
+}
+
+/// Parse raw WB main menu JSON array into `WbCategoriesResponse` with subtree & depth bounding.
+pub fn parse_categories(
+    data: &[Value],
+    root: &str,
+    max_depth: usize,
+    host_used: Option<String>,
+) -> Result<WbCategoriesResponse, ScraperError> {
+    if data.is_empty() {
+        return Err(ScraperError::Parse(
+            "wb_categories: expected a non-empty menu array".to_string(),
+        ));
+    }
+
+    let requested = root.trim();
+    let (nodes, resolved) = if requested.is_empty()
+        || requested.eq_ignore_ascii_case("top")
+        || requested.eq_ignore_ascii_case("root")
+        || requested.eq_ignore_ascii_case("all")
+    {
+        (data, "top".to_string())
+    } else {
+        let subtree = find_menu_subtree(data, requested).ok_or_else(|| {
+            ScraperError::NotFound {
+                query: format!(
+                    "category '{requested}' not found in the WB menu — call get_categories(\"top\") to list sections"
+                ),
+            }
+        })?;
+        let children = subtree
+            .get("childs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        let raw_name = subtree
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(requested);
+        let resolved_name = decode_mojibake(raw_name);
+        (children, resolved_name)
+    };
+
+    let max_depth = max_depth.max(1);
+    let limit_depth = max_depth - 1;
+    let mut budget = WB_MENU_MAX_NODES;
+    let mut items = Vec::new();
+
+    for raw in nodes {
+        if let Some(node) = build_menu_node(raw, 0, &mut budget, limit_depth) {
+            items.push(node);
+        } else {
+            break;
+        }
+    }
+
+    let truncated = budget == 0;
+    let total_returned = WB_MENU_MAX_NODES - budget;
+
+    Ok(WbCategoriesResponse {
+        root: resolved,
+        max_depth,
+        total_returned,
+        truncated,
+        items,
         host_used,
     })
 }

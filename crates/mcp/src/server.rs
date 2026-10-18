@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
+use ru_marketplace_aliexpress::AliExpressConnector;
 use ru_marketplace_citilink::CitilinkConnector;
 use ru_marketplace_core::connector::MarketplaceConnector;
 use ru_marketplace_core::domain::error_codes;
@@ -16,6 +17,7 @@ use ru_marketplace_core::session::SessionManager;
 use ru_marketplace_dns::DnsConnector;
 use ru_marketplace_ozon::OzonConnector;
 use ru_marketplace_solver::NativeCdpSolver;
+use ru_marketplace_taobao::TaobaoConnector;
 use ru_marketplace_wb::{WB_DEFAULT_DEST, WildberriesConnector};
 use ru_marketplace_yandex::YandexConnector;
 
@@ -27,6 +29,8 @@ pub struct McpServer {
     dns: Arc<DnsConnector>,
     citilink: Arc<CitilinkConnector>,
     yandex: Arc<YandexConnector>,
+    aliexpress: Arc<AliExpressConnector>,
+    taobao: Arc<TaobaoConnector>,
     session_manager: Arc<SessionManager>,
     #[allow(dead_code)]
     solver: Arc<NativeCdpSolver>,
@@ -68,6 +72,8 @@ impl McpServer {
         let dns = Arc::new(DnsConnector::with_solver(Some(solver.clone())));
         let citilink = Arc::new(CitilinkConnector::with_solver(Some(solver.clone())));
         let yandex = Arc::new(YandexConnector::with_solver(Some(solver.clone())));
+        let aliexpress = Arc::new(AliExpressConnector::with_solver(Some(solver.clone())));
+        let taobao = Arc::new(TaobaoConnector::with_solver(solver.clone()));
 
         let connectors: Vec<Arc<dyn MarketplaceConnector>> = vec![
             wb.clone(),
@@ -75,6 +81,8 @@ impl McpServer {
             yandex.clone(),
             dns.clone(),
             citilink.clone(),
+            aliexpress.clone(),
+            taobao.clone(),
         ];
 
         let aggregator = AggregatorService::new(connectors);
@@ -86,6 +94,8 @@ impl McpServer {
             dns,
             citilink,
             yandex,
+            aliexpress,
+            taobao,
             session_manager,
             solver,
         }
@@ -199,7 +209,7 @@ impl McpServer {
         vec![
             McpTool {
                 name: "compare_prices".to_string(),
-                description: "Price one product across all Russian marketplaces (Wildberries, Ozon, Yandex Market, DNS, Citilink) concurrently and rank by price.".to_string(),
+                description: "Price one product across Russian and international marketplaces (Wildberries, Ozon, Yandex Market, DNS, Citilink, AliExpress, Taobao) concurrently and rank by price.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -209,7 +219,7 @@ impl McpServer {
                         },
                         "marketplace": {
                             "type": "string",
-                            "description": "Optional single marketplace filter (wildberries, ozon, yandex, dns, citilink)"
+                            "description": "Optional single marketplace filter (wildberries, ozon, yandex, dns, citilink, aliexpress, taobao)"
                         },
                         "marketplaces": {
                             "type": "array",
@@ -648,6 +658,128 @@ impl McpServer {
                     "properties": {}
                 }),
             },
+            McpTool {
+                name: "wb_categories".to_string(),
+                description: "Browse the Wildberries catalog category tree with depth and subtree filtering.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "root": {
+                            "type": "string",
+                            "description": "'top' for the top-level sections, or a category name / URL path / id to expand (e.g. 'Электроника', '/catalog/elektronika', '8126')",
+                            "default": "top"
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "How many levels below the root to include. 1 = direct children only.",
+                            "minimum": 1,
+                            "maximum": 3,
+                            "default": 1
+                        }
+                    }
+                }),
+            },
+            McpTool {
+                name: "wb_category_products".to_string(),
+                description: "List products in a Wildberries catalog category using shard and query selectors from wb_categories.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "shard": {
+                            "type": "string",
+                            "description": "WB catalog shard from wb_categories, e.g. 'electronic58'"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "WB catalog selector from wb_categories, e.g. 'cat=9845' or 'subject=1234'"
+                        },
+                        "page": {
+                            "type": "integer",
+                            "description": "Page number (up to 100 products per page)",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 1
+                        },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sort order: popular, priceup, pricedown, rate, newly",
+                            "enum": ["popular", "priceup", "pricedown", "rate", "newly"],
+                            "default": "popular"
+                        },
+                        "dest": {
+                            "type": "string",
+                            "description": "Optional WB region ID (defaults to Moscow region)"
+                        }
+                    },
+                    "required": ["shard", "query"]
+                }),
+            },
+            McpTool {
+                name: "aliexpress_search".to_string(),
+                description: "Search AliExpress Russia catalog with authentic browser session bypass (x5sec).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query" },
+                        "limit": { "type": "integer", "description": "Maximum offers to return (default 10)", "minimum": 1, "maximum": 50 },
+                        "min_price": { "type": "integer", "description": "Minimum price in rubles", "minimum": 0 },
+                        "max_price": { "type": "integer", "description": "Maximum price in rubles", "minimum": 0 },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            McpTool {
+                name: "aliexpress_card".to_string(),
+                description: "Get detailed product card information for an AliExpress Russia item by 9-16 digit item ID or URL.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "AliExpress 9-16 digit item ID or aliexpress.ru item URL"
+                        }
+                    },
+                    "required": ["item_id"]
+                }),
+            },
+            McpTool {
+                name: "taobao_search".to_string(),
+                description: "Search Taobao marketplace catalog with prices kept in Chinese Yuan (CNY).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query" },
+                        "limit": { "type": "integer", "description": "Maximum offers to return (default 10)", "minimum": 1, "maximum": 50 },
+                        "min_price": { "type": "integer", "description": "Minimum price in yuan (CNY)", "minimum": 0 },
+                        "max_price": { "type": "integer", "description": "Maximum price in yuan (CNY)", "minimum": 0 },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            McpTool {
+                name: "taobao_card".to_string(),
+                description: "Get detailed product card information for a Taobao item by numeric item ID or item URL (prices in CNY).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Taobao 9-13 digit item ID or item.taobao.com URL"
+                        }
+                    },
+                    "required": ["item_id"]
+                }),
+            },
         ]
     }
 
@@ -1002,6 +1134,8 @@ impl McpServer {
                     Marketplace::YandexMarket => self.yandex.as_ref(),
                     Marketplace::Dns => self.dns.as_ref(),
                     Marketplace::Citilink => self.citilink.as_ref(),
+                    Marketplace::AliExpress => self.aliexpress.as_ref(),
+                    Marketplace::Taobao => self.taobao.as_ref(),
                     _ => {
                         return McpCallResult::error(format!(
                             "Unsupported marketplace for verify: {m}"
@@ -1014,7 +1148,11 @@ impl McpServer {
                     url: item_id.to_string(),
                     price_tier: ru_marketplace_core::domain::PriceTier::Base(expected_price),
                     original_price: None,
-                    currency: ru_marketplace_core::domain::Currency::Rub,
+                    currency: if m == Marketplace::Taobao {
+                        ru_marketplace_core::domain::Currency::Cny
+                    } else {
+                        ru_marketplace_core::domain::Currency::Rub
+                    },
                     rating: None,
                     review_count: None,
                     stock: ru_marketplace_core::domain::StockStatus::InStock(1),
@@ -1088,11 +1226,129 @@ impl McpServer {
                         "features": ["search", "card"],
                         "latency": "~200ms",
                         "transport": "Next.js JSON/DOM + Solver CDP fallback"
-                    }
+                    },
+                    {
+                        "marketplace": "aliexpress",
+                        "features": ["search", "card"],
+                        "latency": "~500ms",
+                        "transport": "HTTP / NativeCdpSolver x5sec fallback"
+                    },
+                    {
+                        "marketplace": "taobao",
+                        "features": ["search", "card"],
+                        "latency": "~800ms",
+                        "transport": "NativeCdpSolver signed mtop API (prices in CNY)"
+                    },
                 ]);
                 match serde_json::to_string_pretty(&sources) {
                     Ok(text) => McpCallResult::text(text),
                     Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                }
+            }
+            "wb_categories" => {
+                let root = args.get("root").and_then(|v| v.as_str()).unwrap_or("top");
+                let max_depth = args
+                    .get("max_depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|d| d as usize)
+                    .unwrap_or(1);
+                match self.wb.get_categories(root, max_depth).await {
+                    Ok(resp) => match serde_json::to_string_pretty(&resp) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Wildberries categories error: {e}")),
+                }
+            }
+            "wb_category_products" => {
+                let shard = args
+                    .get("shard")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let cat_query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let page = args
+                    .get("page")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p as usize)
+                    .unwrap_or(1);
+                let sort_str = args.get("sort").and_then(|v| v.as_str());
+                let dest_str = args.get("dest").and_then(|v| v.as_str());
+                if shard.trim().is_empty() || cat_query.trim().is_empty() {
+                    return McpCallResult::error(
+                        "Arguments 'shard' and 'query' must not be empty (take them from wb_categories)",
+                    );
+                }
+                match self
+                    .wb
+                    .get_category_products_full(shard, cat_query, page, sort_str, dest_str)
+                    .await
+                {
+                    Ok(resp) => match serde_json::to_string_pretty(&resp) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => {
+                        McpCallResult::error(format!("Wildberries category products error: {e}"))
+                    }
+                }
+            }
+            "aliexpress_search" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
+                match self.aliexpress.search(query, limit.max(10), &filters).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("AliExpress search error: {e}")),
+                }
+            }
+            "aliexpress_card" => {
+                let item_id = args
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if item_id.trim().is_empty() {
+                    return McpCallResult::error("Argument 'item_id' must not be empty");
+                }
+                match self.aliexpress.get_card(item_id).await {
+                    Ok(offer) => match serde_json::to_string_pretty(&offer) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("AliExpress card error: {e}")),
+                }
+            }
+            "taobao_search" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
+                match self.taobao.search(query, limit.max(10), &filters).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Taobao search error: {e}")),
+                }
+            }
+            "taobao_card" => {
+                let item_id = args
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if item_id.trim().is_empty() {
+                    return McpCallResult::error("Argument 'item_id' must not be empty");
+                }
+                match self.taobao.get_card(item_id).await {
+                    Ok(offer) => match serde_json::to_string_pretty(&offer) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Taobao card error: {e}")),
                 }
             }
             "session_start" => {

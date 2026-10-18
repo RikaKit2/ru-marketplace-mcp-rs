@@ -9,10 +9,12 @@ members = [
     "crates/dns",
     "crates/citilink",
     "crates/yandex",
+    "crates/aliexpress",
+    "crates/taobao",
     "crates/mcp",
 ]
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 authors = ["RikaKit2"]
 license = "MIT"
@@ -25,6 +27,8 @@ ru-marketplace-wb = { path = "crates/wb" }
 ru-marketplace-dns = { path = "crates/dns" }
 ru-marketplace-citilink = { path = "crates/citilink" }
 ru-marketplace-yandex = { path = "crates/yandex" }
+ru-marketplace-aliexpress = { path = "crates/aliexpress" }
+ru-marketplace-taobao = { path = "crates/taobao" }
 
 futures = "0.3.31"
 async-trait = "0.1.92"

@@ -60,7 +60,7 @@ async fn test_mcp_tools_list() {
         .map(|t| t.get("name").unwrap().as_str().unwrap())
         .collect();
 
-    assert_eq!(tools.len(), 22);
+    assert_eq!(tools.len(), 28);
     assert!(tool_names.contains(&"compare_prices"));
     assert!(tool_names.contains(&"wb_search"));
     assert!(tool_names.contains(&"wb_card"));
@@ -68,6 +68,8 @@ async fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"wb_root_info"));
     assert!(tool_names.contains(&"wb_reviews"));
     assert!(tool_names.contains(&"wb_seller"));
+    assert!(tool_names.contains(&"wb_categories"));
+    assert!(tool_names.contains(&"wb_category_products"));
     assert!(tool_names.contains(&"ozon_search"));
     assert!(tool_names.contains(&"ozon_card"));
     assert!(tool_names.contains(&"ozon_reviews"));
@@ -77,6 +79,10 @@ async fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"dns_card"));
     assert!(tool_names.contains(&"citilink_search"));
     assert!(tool_names.contains(&"citilink_card"));
+    assert!(tool_names.contains(&"aliexpress_search"));
+    assert!(tool_names.contains(&"aliexpress_card"));
+    assert!(tool_names.contains(&"taobao_search"));
+    assert!(tool_names.contains(&"taobao_card"));
     assert!(tool_names.contains(&"compare_verify_offer"));
     assert!(tool_names.contains(&"compare_browser_snapshot"));
     assert!(tool_names.contains(&"compare_sources"));

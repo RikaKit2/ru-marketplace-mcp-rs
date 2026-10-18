@@ -1,7 +1,8 @@
 use ru_marketplace_core::domain::{Currency, Marketplace, PriceTier, ScraperError, StockStatus};
 use ru_marketplace_wb::{
-    BasketResolver, WbReviewItem, WbReviewsResponse, WbRootInfo, WbSellerInfo,
-    WildberriesConnector, basket_host_for_vol, decode_mojibake, parse_products_json,
+    BasketResolver, WbCategoriesResponse, WbCategoryNode, WbCategoryProductsResponse, WbReviewItem,
+    WbReviewsResponse, WbRootInfo, WbSellerInfo, WildberriesConnector, basket_host_for_vol,
+    build_menu_node, decode_mojibake, find_menu_subtree, parse_categories, parse_products_json,
     parse_reviews_json, parse_root_info_json, parse_seller_info_json,
 };
 
@@ -275,4 +276,244 @@ async fn test_wb_get_cards_batch_validation() {
     let ids: Vec<u64> = (1..=101).collect();
     let err = connector.get_cards_batch(&ids).await.unwrap_err();
     assert!(matches!(err, ScraperError::InvalidFilter(_)));
+}
+
+const MOCK_WB_MENU_JSON: &str = r#"[
+  {
+    "id": 8126,
+    "name": "Электроника",
+    "url": "/catalog/elektronika",
+    "shard": "electronic58",
+    "query": "cat=8126",
+    "childs": [
+      {
+        "id": 9845,
+        "name": "Смартфоны и телефоны",
+        "url": "/catalog/elektronika/smartfony-i-telefony",
+        "shard": "electronic58",
+        "query": "cat=9845",
+        "childs": [
+          {
+            "id": 1234,
+            "name": "Смартфоны",
+            "url": "/catalog/elektronika/smartfony",
+            "shard": "electronic58",
+            "query": "cat=1234"
+          }
+        ]
+      },
+      {
+        "id": 9846,
+        "name": "Ноутбуки",
+        "url": "/catalog/elektronika/noutbuki",
+        "shard": "electronic58",
+        "query": "cat=9846"
+      }
+    ]
+  },
+  {
+    "id": 8200,
+    "name": "Бытовая техника",
+    "url": "/catalog/bytovaya-tehnika",
+    "shard": "blackhole",
+    "query": "cat=8200",
+    "childs": [
+      {
+        "id": 8201,
+        "name": "Пылесосы",
+        "url": "/catalog/bytovaya-tehnika/pylesosy",
+        "shard": "appliances2",
+        "query": "cat=8201"
+      }
+    ]
+  }
+]"#;
+
+#[test]
+fn test_wb_find_menu_subtree() {
+    let menu: Vec<serde_json::Value> = serde_json::from_str(MOCK_WB_MENU_JSON).unwrap();
+
+    // Search by exact name
+    let found = find_menu_subtree(&menu, "Электроника").expect("should find by name");
+    assert_eq!(found.get("id").and_then(|v| v.as_u64()), Some(8126));
+
+    // Search by nested name
+    let found_sub = find_menu_subtree(&menu, "Ноутбуки").expect("should find nested category");
+    assert_eq!(found_sub.get("id").and_then(|v| v.as_u64()), Some(9846));
+
+    // Search by url
+    let found_url = find_menu_subtree(&menu, "/catalog/elektronika").expect("should find by url");
+    assert_eq!(found_url.get("id").and_then(|v| v.as_u64()), Some(8126));
+
+    // Search by url slug
+    let found_slug = find_menu_subtree(&menu, "noutbuki").expect("should find by slug");
+    assert_eq!(found_slug.get("id").and_then(|v| v.as_u64()), Some(9846));
+
+    // Search by numeric ID
+    let found_id = find_menu_subtree(&menu, "9845").expect("should find by id");
+    assert_eq!(
+        found_id.get("name").and_then(|v| v.as_str()),
+        Some("Смартфоны и телефоны")
+    );
+
+    // Not found
+    assert!(find_menu_subtree(&menu, "Несуществующая категория").is_none());
+}
+
+#[test]
+fn test_wb_parse_categories_top_level() {
+    let menu: Vec<serde_json::Value> = serde_json::from_str(MOCK_WB_MENU_JSON).unwrap();
+
+    let res =
+        parse_categories(&menu, "top", 1, Some("static-basket-01.wbbasket.ru".into())).unwrap();
+    assert_eq!(res.root, "top");
+    assert_eq!(res.max_depth, 1);
+    assert_eq!(res.items.len(), 2);
+    assert_eq!(res.total_returned, 2);
+    assert!(!res.truncated);
+    assert_eq!(
+        res.host_used.as_deref(),
+        Some("static-basket-01.wbbasket.ru")
+    );
+
+    let first = &res.items[0];
+    assert_eq!(first.id, Some(8126));
+    assert_eq!(first.name, "Электроника");
+    assert_eq!(first.url, "/catalog/elektronika");
+    assert_eq!(first.shard.as_deref(), Some("electronic58"));
+    assert_eq!(first.query.as_deref(), Some("cat=8126"));
+    assert_eq!(first.depth, 0);
+    assert_eq!(first.children_count, 2);
+    // With max_depth = 1, children are not expanded
+    assert!(first.childs.is_empty());
+    assert!(first.children().is_empty());
+}
+
+#[test]
+fn test_wb_parse_categories_depth_expansion() {
+    let menu: Vec<serde_json::Value> = serde_json::from_str(MOCK_WB_MENU_JSON).unwrap();
+
+    let res = parse_categories(&menu, "top", 2, None).unwrap();
+    assert_eq!(res.max_depth, 2);
+    assert_eq!(res.items.len(), 2);
+    // 2 top-level + 2 children of first + 1 child of second = 5 total nodes returned
+    assert_eq!(res.total_returned, 5);
+
+    let first = &res.items[0];
+    assert_eq!(first.childs.len(), 2);
+    assert_eq!(first.childs[0].name, "Смартфоны и телефоны");
+    assert_eq!(first.childs[0].depth, 1);
+    assert_eq!(first.childs[0].children_count, 1);
+    // Grandchildren not expanded at max_depth = 2
+    assert!(first.childs[0].childs.is_empty());
+
+    assert_eq!(first.childs[1].name, "Ноутбуки");
+    assert_eq!(first.childs[1].depth, 1);
+}
+
+#[test]
+fn test_wb_parse_categories_subtree() {
+    let menu: Vec<serde_json::Value> = serde_json::from_str(MOCK_WB_MENU_JSON).unwrap();
+
+    let res = parse_categories(&menu, "Электроника", 1, None).unwrap();
+    assert_eq!(res.root, "Электроника");
+    assert_eq!(res.items.len(), 2);
+    assert_eq!(res.items[0].name, "Смартфоны и телефоны");
+    assert_eq!(res.items[1].name, "Ноутбуки");
+}
+
+#[test]
+fn test_wb_parse_categories_not_found_and_empty() {
+    let menu: Vec<serde_json::Value> = serde_json::from_str(MOCK_WB_MENU_JSON).unwrap();
+
+    let err_not_found = parse_categories(&menu, "UnknownCategory", 1, None).unwrap_err();
+    assert!(matches!(err_not_found, ScraperError::NotFound { .. }));
+
+    let err_empty = parse_categories(&[], "top", 1, None).unwrap_err();
+    assert!(matches!(err_empty, ScraperError::Parse(_)));
+}
+
+#[tokio::test]
+async fn test_wb_category_products_validation_and_blackhole() {
+    let connector = WildberriesConnector::default();
+
+    // Blackhole shard must return ScraperError::InvalidFilter
+    let err_blackhole = connector
+        .get_category_products("blackhole", "cat=8200", 1, None)
+        .await
+        .unwrap_err();
+    match err_blackhole {
+        ScraperError::InvalidFilter(msg) => {
+            assert!(msg.contains("blackhole"));
+            assert!(msg.contains("только навигационной"));
+        }
+        other => panic!("expected InvalidFilter for blackhole, got: {other:?}"),
+    }
+
+    // Empty shard validation
+    let err_empty_shard = connector
+        .get_category_products("", "cat=8200", 1, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err_empty_shard, ScraperError::InvalidFilter(_)));
+
+    // Empty query validation
+    let err_empty_query = connector
+        .get_category_products("appliances2", "", 1, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err_empty_query, ScraperError::InvalidFilter(_)));
+}
+
+#[tokio::test]
+async fn test_wb_menu_caching_in_connector() {
+    let connector = WildberriesConnector::default();
+    let menu: Vec<serde_json::Value> = serde_json::from_str(MOCK_WB_MENU_JSON).unwrap();
+
+    // Pre-populate cache
+    connector
+        .set_menu_cache(menu, "mock-static-host.wbbasket.ru".to_string())
+        .await;
+
+    // Retrieve categories via connector without any network request
+    let res = connector.get_categories("top", 1).await.unwrap();
+    assert_eq!(res.root, "top");
+    assert_eq!(res.items.len(), 2);
+    assert_eq!(
+        res.host_used.as_deref(),
+        Some("mock-static-host.wbbasket.ru")
+    );
+
+    // Retrieve subtree via connector
+    let sub = connector.get_categories("Ноутбуки", 1).await.unwrap();
+    assert_eq!(sub.root, "Ноутбуки");
+    assert_eq!(sub.items.len(), 0); // leaf category
+}
+
+#[test]
+fn test_wb_category_node_serde() {
+    let node = WbCategoryNode {
+        id: Some(42),
+        name: "Test Cat".to_string(),
+        url: "/catalog/test".to_string(),
+        shard: Some("shard1".to_string()),
+        query: Some("cat=42".to_string()),
+        depth: 0,
+        children_count: 1,
+        childs: vec![WbCategoryNode {
+            id: Some(43),
+            name: "Child Cat".to_string(),
+            url: "/catalog/test/child".to_string(),
+            shard: Some("shard1".to_string()),
+            query: Some("cat=43".to_string()),
+            depth: 1,
+            children_count: 0,
+            childs: Vec::new(),
+        }],
+    };
+
+    let json = serde_json::to_string(&node).unwrap();
+    let deserialized: WbCategoryNode = serde_json::from_str(&json).unwrap();
+    assert_eq!(node, deserialized);
+    assert_eq!(deserialized.children().len(), 1);
 }
