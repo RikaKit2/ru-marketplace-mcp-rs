@@ -10,7 +10,9 @@ use ru_marketplace_core::session::SessionManager;
 use ru_marketplace_core::transport::apply_browser_fingerprint;
 use ru_marketplace_solver::NativeCdpSolver;
 
-use super::parser::{parse_card_json, parse_composer_json};
+use super::parser::{
+    OzonReviewsResponse, extract_sku, parse_card_json, parse_composer_json, parse_reviews_json,
+};
 
 pub const OZON_COMPOSER_URL: &str = "https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2";
 
@@ -47,6 +49,95 @@ impl OzonConnector {
             session_manager,
             solver,
         }
+    }
+
+    /// Fetch product reviews and score distribution using Ozon's Composer JSON API with solver fallback.
+    pub async fn get_reviews(
+        &self,
+        sku_or_url: &str,
+        page: usize,
+        sort: &str,
+    ) -> Result<OzonReviewsResponse, ScraperError> {
+        let sku = extract_sku(sku_or_url).ok_or_else(|| {
+            ScraperError::InvalidFilter(format!("Invalid Ozon SKU or URL: {sku_or_url}"))
+        })?;
+
+        let page_num = if page == 0 { 1 } else { page };
+        let sort_key = match sort {
+            "score_desc" | "rating_desc" | "high_rating" => "score_desc",
+            "score_asc" | "rating_asc" | "low_rating" => "score_asc",
+            "published_at_desc" | "new" | "date" | "useful" | "default" | "" => "published_at_desc",
+            other => other,
+        };
+
+        let url_param = format!("/product/{sku}/reviews?page={page_num}&sort={sort_key}");
+        let full_url = format!("{OZON_COMPOSER_URL}?url={url_param}");
+        let session = self.session_manager.get_session("ozon").await;
+
+        let req = self
+            .client
+            .get(OZON_COMPOSER_URL)
+            .query(&[("url", &url_param)]);
+        let req = apply_browser_fingerprint(req, session.as_ref());
+
+        let body = match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    let text = resp.text().await?;
+                    if text.contains("challenge-platform") || text.contains("cf-turnstile") {
+                        info!(
+                            "Ozon reviews challenge detected (cf-turnstile), falling back to Chromium solver tab..."
+                        );
+                        if session.is_some() {
+                            self.session_manager
+                                .invalidate_if_rejected("ozon", status, &text)
+                                .await;
+                        }
+                        self.solver
+                            .fetch_in_tab(Marketplace::Ozon, &full_url)
+                            .await?
+                    } else {
+                        text
+                    }
+                } else if status == reqwest::StatusCode::FORBIDDEN
+                    || status.as_u16() == 403
+                    || status.as_u16() == 307
+                {
+                    info!(
+                        "Ozon reviews direct HTTP {}, falling back to Chromium solver tab...",
+                        status
+                    );
+                    if session.is_some() {
+                        self.session_manager
+                            .invalidate_if_rejected("ozon", status, "")
+                            .await;
+                    }
+                    self.solver
+                        .fetch_in_tab(Marketplace::Ozon, &full_url)
+                        .await?
+                } else {
+                    info!(
+                        "Ozon reviews direct HTTP status {}, falling back to Chromium solver tab...",
+                        status
+                    );
+                    self.solver
+                        .fetch_in_tab(Marketplace::Ozon, &full_url)
+                        .await?
+                }
+            }
+            Err(e) => {
+                info!(
+                    "Ozon reviews direct HTTP error ({}), falling back to Chromium solver tab...",
+                    e
+                );
+                self.solver
+                    .fetch_in_tab(Marketplace::Ozon, &full_url)
+                    .await?
+            }
+        };
+
+        parse_reviews_json(&body, &sku, page_num, sort_key)
     }
 }
 

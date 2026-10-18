@@ -15,3 +15,6 @@ cookies.json
 .env.*
 *.pem
 *.key
+
+# External reference and comparison repos
+/other/

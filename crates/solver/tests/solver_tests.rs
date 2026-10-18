@@ -149,3 +149,54 @@ fn test_stage_detection_script_and_page_stages() {
     assert_ne!(PageStage::Ready, PageStage::ChallengeActive);
     assert_ne!(PageStage::Navigating, PageStage::Blocked);
 }
+
+#[test]
+fn test_base64_roundtrip_and_edge_cases() {
+    use ru_marketplace_solver::{decode_base64, encode_base64};
+
+    // Empty
+    assert_eq!(encode_base64(b""), "");
+    assert_eq!(decode_base64("").unwrap(), Vec::<u8>::new());
+
+    // 1-byte
+    assert_eq!(encode_base64(b"f"), "Zg==");
+    assert_eq!(decode_base64("Zg==").unwrap(), b"f");
+
+    // 2-bytes
+    assert_eq!(encode_base64(b"fo"), "Zm8=");
+    assert_eq!(decode_base64("Zm8=").unwrap(), b"fo");
+
+    // 3-bytes
+    assert_eq!(encode_base64(b"foo"), "Zm9v");
+    assert_eq!(decode_base64("Zm9v").unwrap(), b"foo");
+
+    // JPEG header simulation
+    let jpeg_sample = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46];
+    let encoded = encode_base64(&jpeg_sample);
+    let decoded = decode_base64(&encoded).unwrap();
+    assert_eq!(decoded, jpeg_sample);
+
+    // Whitespace toleration
+    let with_whitespace = format!("  \n{}\r\n  ", encoded);
+    assert_eq!(decode_base64(&with_whitespace).unwrap(), jpeg_sample);
+
+    // Errors
+    assert!(decode_base64("not_base64!").is_err());
+    assert!(decode_base64("abc").is_err());
+}
+
+#[test]
+fn test_solver_error_variants() {
+    use ru_marketplace_core::domain::ScraperError;
+    use ru_marketplace_solver::SolverError;
+
+    let err1 = SolverError::Blocked("access denied".to_string());
+    assert!(err1.to_string().contains("access denied"));
+
+    let err2 = SolverError::CaptureFailed("no data".to_string());
+    assert!(err2.to_string().contains("no data"));
+
+    let scraper_err = ScraperError::Timeout;
+    let err3 = SolverError::from(scraper_err);
+    assert!(err3.to_string().contains("Request timed out"));
+}

@@ -17,6 +17,7 @@ use ru_marketplace_dns::DnsConnector;
 use ru_marketplace_ozon::OzonConnector;
 use ru_marketplace_solver::NativeCdpSolver;
 use ru_marketplace_wb::{WB_DEFAULT_DEST, WildberriesConnector};
+use ru_marketplace_yandex::YandexConnector;
 
 /// MCP Stdio JSON-RPC 2.0 Server.
 pub struct McpServer {
@@ -25,6 +26,7 @@ pub struct McpServer {
     ozon: Arc<OzonConnector>,
     dns: Arc<DnsConnector>,
     citilink: Arc<CitilinkConnector>,
+    yandex: Arc<YandexConnector>,
     session_manager: Arc<SessionManager>,
     #[allow(dead_code)]
     solver: Arc<NativeCdpSolver>,
@@ -65,9 +67,15 @@ impl McpServer {
         ));
         let dns = Arc::new(DnsConnector::with_solver(Some(solver.clone())));
         let citilink = Arc::new(CitilinkConnector::with_solver(Some(solver.clone())));
+        let yandex = Arc::new(YandexConnector::with_solver(Some(solver.clone())));
 
-        let connectors: Vec<Arc<dyn MarketplaceConnector>> =
-            vec![wb.clone(), ozon.clone(), dns.clone(), citilink.clone()];
+        let connectors: Vec<Arc<dyn MarketplaceConnector>> = vec![
+            wb.clone(),
+            ozon.clone(),
+            yandex.clone(),
+            dns.clone(),
+            citilink.clone(),
+        ];
 
         let aggregator = AggregatorService::new(connectors);
 
@@ -77,6 +85,7 @@ impl McpServer {
             ozon,
             dns,
             citilink,
+            yandex,
             session_manager,
             solver,
         }
@@ -190,7 +199,7 @@ impl McpServer {
         vec![
             McpTool {
                 name: "compare_prices".to_string(),
-                description: "Price one product across all Russian marketplaces (Wildberries, Ozon, DNS, Citilink) concurrently and rank by price.".to_string(),
+                description: "Price one product across all Russian marketplaces (Wildberries, Ozon, Yandex Market, DNS, Citilink) concurrently and rank by price.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -200,7 +209,7 @@ impl McpServer {
                         },
                         "marketplace": {
                             "type": "string",
-                            "description": "Optional single marketplace filter (wildberries, ozon, dns, citilink)"
+                            "description": "Optional single marketplace filter (wildberries, ozon, yandex, dns, citilink)"
                         },
                         "marketplaces": {
                             "type": "array",
@@ -366,6 +375,20 @@ impl McpServer {
                 }),
             },
             McpTool {
+                name: "dns_card".to_string(),
+                description: "Get detailed product card information for a DNS-Shop item by ID or URL slug.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "DNS product ID (e.g. '543210' or product slug from URL)"
+                        }
+                    },
+                    "required": ["item_id"]
+                }),
+            },
+            McpTool {
                 name: "citilink_search".to_string(),
                 description: "Search Citilink catalog with anti-bot challenge detection.".to_string(),
                 input_schema: json!({
@@ -398,6 +421,20 @@ impl McpServer {
                         }
                     },
                     "required": ["query"]
+                }),
+            },
+            McpTool {
+                name: "citilink_card".to_string(),
+                description: "Get detailed product card information for a Citilink item by ID or URL slug.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Citilink product ID (e.g. '1928374' or slug from URL)"
+                        }
+                    },
+                    "required": ["item_id"]
                 }),
             },
             McpTool {
@@ -440,6 +477,175 @@ impl McpServer {
                             "enum": ["all", "ozon", "wb", "dns", "citilink"]
                         }
                     }
+                }),
+            },
+            McpTool {
+                name: "yandex_search".to_string(),
+                description: "Search Yandex Market catalog via fast SSR JSON extraction without headless browser.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Russian search query" },
+                        "limit": { "type": "integer", "description": "Maximum offers to return (default 10)", "minimum": 1, "maximum": 50 },
+                        "min_price": { "type": "integer", "description": "Minimum price in rubles", "minimum": 0 },
+                        "max_price": { "type": "integer", "description": "Maximum price in rubles", "minimum": 0 },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria",
+                            "enum": ["popular", "price_asc", "price_desc", "rating", "reviews", "discount"]
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            McpTool {
+                name: "yandex_card".to_string(),
+                description: "Get detailed product card information for a Yandex Market item by ID or URL slug.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Yandex Market SKU, model ID or product URL path"
+                        }
+                    },
+                    "required": ["item_id"]
+                }),
+            },
+            McpTool {
+                name: "wb_cards_batch".to_string(),
+                description: "Get detailed product cards for up to 100 Wildberries items in a single batch request.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "List of Wildberries articles / nm IDs (up to 100)"
+                        }
+                    },
+                    "required": ["item_ids"]
+                }),
+            },
+            McpTool {
+                name: "wb_root_info".to_string(),
+                description: "Get Wildberries item root info (imt_id, category, vendor code) needed for reviews and questions.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Wildberries article / nm ID, e.g. '164379765'"
+                        }
+                    },
+                    "required": ["item_id"]
+                }),
+            },
+            McpTool {
+                name: "wb_reviews".to_string(),
+                description: "Get customer reviews for a Wildberries product pool by imt_id (model root ID).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "imt_id": {
+                            "type": "integer",
+                            "description": "Wildberries root model ID (imt_id), obtained via wb_root_info"
+                        },
+                        "page": {
+                            "type": "integer",
+                            "description": "Page number (default 1)",
+                            "minimum": 1
+                        }
+                    },
+                    "required": ["imt_id"]
+                }),
+            },
+            McpTool {
+                name: "wb_seller".to_string(),
+                description: "Get Wildberries seller legal information (OGRN, INN, legal address) by supplier_id.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "supplier_id": {
+                            "type": "integer",
+                            "description": "Wildberries supplier/seller numeric ID"
+                        }
+                    },
+                    "required": ["supplier_id"]
+                }),
+            },
+            McpTool {
+                name: "ozon_reviews".to_string(),
+                description: "Get customer reviews, aspects, and star distribution for an Ozon item by SKU or URL.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "sku_or_url": {
+                            "type": "string",
+                            "description": "Ozon product SKU or product URL"
+                        },
+                        "page": {
+                            "type": "integer",
+                            "description": "Page number (default 1)",
+                            "minimum": 1
+                        },
+                        "sort": {
+                            "type": "string",
+                            "description": "Sorting criteria for reviews (e.g. 'score_desc', 'score_asc', 'useful_desc')",
+                            "default": "score_desc"
+                        }
+                    },
+                    "required": ["sku_or_url"]
+                }),
+            },
+            McpTool {
+                name: "compare_verify_offer".to_string(),
+                description: "Verify an offer against live marketplace data to confirm current price and stock status.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "marketplace": {
+                            "type": "string",
+                            "description": "Marketplace identifier ('wildberries', 'ozon', 'yandex', 'dns', 'citilink')"
+                        },
+                        "item_id": {
+                            "type": "string",
+                            "description": "Product ID, SKU or URL"
+                        },
+                        "expected_price": {
+                            "type": "integer",
+                            "description": "Expected price in rubles to compare against current live price"
+                        }
+                    },
+                    "required": ["marketplace", "item_id", "expected_price"]
+                }),
+            },
+            McpTool {
+                name: "compare_browser_snapshot".to_string(),
+                description: "Capture a full-page JPEG screenshot of a marketplace product page via Chromium CDP for Vision models (returns base64 JPEG).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Target marketplace URL to render and capture"
+                        },
+                        "quality": {
+                            "type": "integer",
+                            "description": "JPEG quality (1-100, default 75)",
+                            "minimum": 1,
+                            "maximum": 100
+                        }
+                    },
+                    "required": ["url"]
+                }),
+            },
+            McpTool {
+                name: "compare_sources".to_string(),
+                description: "List all supported Russian marketplaces and their extraction capabilities.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
                 }),
             },
         ]
@@ -589,6 +795,22 @@ impl McpServer {
                     Err(e) => McpCallResult::error(format!("DNS search error: {e}")),
                 }
             }
+            "dns_card" => {
+                let item_id = args
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if item_id.trim().is_empty() {
+                    return McpCallResult::error("Argument 'item_id' must not be empty");
+                }
+                match self.dns.get_card(item_id).await {
+                    Ok(offer) => match serde_json::to_string_pretty(&offer) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("DNS card error: {e}")),
+                }
+            }
             "citilink_search" => {
                 if query.trim().is_empty() {
                     return McpCallResult::error("Argument 'query' must not be empty");
@@ -599,6 +821,278 @@ impl McpServer {
                         Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
                     },
                     Err(e) => McpCallResult::error(format!("Citilink search error: {e}")),
+                }
+            }
+            "citilink_card" => {
+                let item_id = args
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if item_id.trim().is_empty() {
+                    return McpCallResult::error("Argument 'item_id' must not be empty");
+                }
+                match self.citilink.get_card(item_id).await {
+                    Ok(offer) => match serde_json::to_string_pretty(&offer) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Citilink card error: {e}")),
+                }
+            }
+            "yandex_search" => {
+                if query.trim().is_empty() {
+                    return McpCallResult::error("Argument 'query' must not be empty");
+                }
+                match self.yandex.search(query, limit.max(10), &filters).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Yandex Market search error: {e}")),
+                }
+            }
+            "yandex_card" => {
+                let item_id = args
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if item_id.trim().is_empty() {
+                    return McpCallResult::error("Argument 'item_id' must not be empty");
+                }
+                match self.yandex.get_card(item_id).await {
+                    Ok(offer) => match serde_json::to_string_pretty(&offer) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Yandex Market card error: {e}")),
+                }
+            }
+            "wb_cards_batch" => {
+                let ids_val = args.get("item_ids");
+                let mut nm_ids = Vec::new();
+                if let Some(arr) = ids_val.and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            if let Ok(id) = s.parse::<u64>() {
+                                nm_ids.push(id);
+                            }
+                        } else if let Some(n) = item.as_u64() {
+                            nm_ids.push(n);
+                        }
+                    }
+                }
+                if nm_ids.is_empty() {
+                    return McpCallResult::error(
+                        "Argument 'item_ids' must contain at least one valid numeric ID",
+                    );
+                }
+                match self.wb.get_cards_batch(&nm_ids).await {
+                    Ok(offers) => match serde_json::to_string_pretty(&offers) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Wildberries cards batch error: {e}")),
+                }
+            }
+            "wb_root_info" => {
+                let nm_id = if let Some(s) = args.get("item_id").and_then(|v| v.as_str()) {
+                    s.parse::<u64>().unwrap_or(0)
+                } else {
+                    args.get("item_id").and_then(|v| v.as_u64()).unwrap_or(0)
+                };
+                if nm_id == 0 {
+                    return McpCallResult::error(
+                        "Argument 'item_id' must be a valid numeric Wildberries article ID",
+                    );
+                }
+                match self.wb.get_root_info(nm_id).await {
+                    Ok(info) => match serde_json::to_string_pretty(&info) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Wildberries root info error: {e}")),
+                }
+            }
+            "wb_reviews" => {
+                let imt_id = args.get("imt_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let page = args
+                    .get("page")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p as usize)
+                    .unwrap_or(1);
+                if imt_id == 0 {
+                    return McpCallResult::error("Argument 'imt_id' must be a valid numeric ID");
+                }
+                match self.wb.get_reviews(imt_id, page).await {
+                    Ok(reviews) => match serde_json::to_string_pretty(&reviews) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Wildberries reviews error: {e}")),
+                }
+            }
+            "wb_seller" => {
+                let supplier_id = args
+                    .get("supplier_id")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if supplier_id == 0 {
+                    return McpCallResult::error(
+                        "Argument 'supplier_id' must be a valid numeric ID",
+                    );
+                }
+                match self.wb.get_seller_info(supplier_id).await {
+                    Ok(seller) => match serde_json::to_string_pretty(&seller) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Wildberries seller error: {e}")),
+                }
+            }
+            "ozon_reviews" => {
+                let sku_or_url = args
+                    .get("sku_or_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let page = args
+                    .get("page")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p as usize)
+                    .unwrap_or(1);
+                let sort = args
+                    .get("sort")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("score_desc");
+                if sku_or_url.trim().is_empty() {
+                    return McpCallResult::error("Argument 'sku_or_url' must not be empty");
+                }
+                match self.ozon.get_reviews(sku_or_url, page, sort).await {
+                    Ok(reviews) => match serde_json::to_string_pretty(&reviews) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Ozon reviews error: {e}")),
+                }
+            }
+            "compare_verify_offer" => {
+                let m_str = args
+                    .get("marketplace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let item_id = args
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let expected_price = args
+                    .get("expected_price")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if m_str.is_empty() || item_id.is_empty() {
+                    return McpCallResult::error(
+                        "Arguments 'marketplace' and 'item_id' must not be empty",
+                    );
+                }
+                let m = match Marketplace::from_str(m_str) {
+                    Ok(m) => m,
+                    Err(e) => return McpCallResult::error(format!("Invalid marketplace: {e}")),
+                };
+                let connector: &dyn MarketplaceConnector = match m {
+                    Marketplace::Wildberries => self.wb.as_ref(),
+                    Marketplace::Ozon => self.ozon.as_ref(),
+                    Marketplace::YandexMarket => self.yandex.as_ref(),
+                    Marketplace::Dns => self.dns.as_ref(),
+                    Marketplace::Citilink => self.citilink.as_ref(),
+                    _ => {
+                        return McpCallResult::error(format!(
+                            "Unsupported marketplace for verify: {m}"
+                        ));
+                    }
+                };
+                let original_offer = ru_marketplace_core::domain::ProductOffer {
+                    marketplace: m,
+                    title: String::new(),
+                    url: item_id.to_string(),
+                    price_tier: ru_marketplace_core::domain::PriceTier::Base(expected_price),
+                    original_price: None,
+                    currency: ru_marketplace_core::domain::Currency::Rub,
+                    rating: None,
+                    review_count: None,
+                    stock: ru_marketplace_core::domain::StockStatus::InStock(1),
+                    seller: None,
+                    product_id: Some(item_id.to_string()),
+                };
+                match ru_marketplace_core::verify_offer(connector, &original_offer).await {
+                    Ok(res) => match serde_json::to_string_pretty(&res) {
+                        Ok(text) => McpCallResult::text(text),
+                        Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                    },
+                    Err(e) => McpCallResult::error(format!("Offer verification error: {e}")),
+                }
+            }
+            "compare_browser_snapshot" => {
+                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+                let quality = args
+                    .get("quality")
+                    .and_then(|v| v.as_u64())
+                    .map(|q| q as u8)
+                    .unwrap_or(75);
+                if url.trim().is_empty() {
+                    return McpCallResult::error("Argument 'url' must not be empty");
+                }
+                match self.solver.capture_screenshot(url, quality).await {
+                    Ok(jpeg_bytes) => {
+                        let b64 = ru_marketplace_solver::encode_base64(&jpeg_bytes);
+                        let result = json!({
+                            "format": "jpeg",
+                            "quality": quality,
+                            "size_bytes": jpeg_bytes.len(),
+                            "base64_data": b64,
+                            "data_uri": format!("data:image/jpeg;base64,{b64}")
+                        });
+                        match serde_json::to_string_pretty(&result) {
+                            Ok(text) => McpCallResult::text(text),
+                            Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
+                        }
+                    }
+                    Err(e) => McpCallResult::error(format!("Screenshot capture error: {e}")),
+                }
+            }
+            "compare_sources" => {
+                let sources = json!([
+                    {
+                        "marketplace": "wildberries",
+                        "features": ["search", "card", "cards_batch", "reviews", "seller", "root_info"],
+                        "latency": "~50ms (cards) / ~200ms (search)",
+                        "transport": "CDN shards + Solver CDP"
+                    },
+                    {
+                        "marketplace": "ozon",
+                        "features": ["search", "card", "reviews"],
+                        "latency": "~250ms",
+                        "transport": "Composer API + Solver CDP fallback"
+                    },
+                    {
+                        "marketplace": "yandex",
+                        "features": ["search", "card"],
+                        "latency": "~150ms",
+                        "transport": "Direct SSR JSON extraction"
+                    },
+                    {
+                        "marketplace": "dns",
+                        "features": ["search", "card"],
+                        "latency": "~300ms",
+                        "transport": "HTTP Microdata/DOM + Solver CDP fallback"
+                    },
+                    {
+                        "marketplace": "citilink",
+                        "features": ["search", "card"],
+                        "latency": "~200ms",
+                        "transport": "Next.js JSON/DOM + Solver CDP fallback"
+                    }
+                ]);
+                match serde_json::to_string_pretty(&sources) {
+                    Ok(text) => McpCallResult::text(text),
+                    Err(e) => McpCallResult::error(format!("Serialization error: {e}")),
                 }
             }
             "session_start" => {

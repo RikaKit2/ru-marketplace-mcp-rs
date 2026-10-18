@@ -54,6 +54,41 @@ impl Marketplace {
         Self::Detmir,
         Self::Cian,
     ];
+
+    /// Infer marketplace from a URL string based on domain patterns.
+    pub fn from_url(url: &str) -> Option<Self> {
+        let lower = url.to_lowercase();
+        if lower.contains("wildberries.ru")
+            || lower.contains("wb.ru")
+            || lower.contains("wbbasket.ru")
+        {
+            Some(Self::Wildberries)
+        } else if lower.contains("ozon.ru") {
+            Some(Self::Ozon)
+        } else if lower.contains("market.yandex.ru") || lower.contains("yandex.ru") {
+            Some(Self::YandexMarket)
+        } else if lower.contains("dns-shop.ru") {
+            Some(Self::Dns)
+        } else if lower.contains("citilink.ru") {
+            Some(Self::Citilink)
+        } else if lower.contains("avito.ru") {
+            Some(Self::Avito)
+        } else if lower.contains("aliexpress") {
+            Some(Self::AliExpress)
+        } else if lower.contains("taobao.com") {
+            Some(Self::Taobao)
+        } else if lower.contains("megamarket.ru") || lower.contains("sbermegamarket.ru") {
+            Some(Self::Megamarket)
+        } else if lower.contains("lamoda.ru") {
+            Some(Self::Lamoda)
+        } else if lower.contains("detmir.ru") {
+            Some(Self::Detmir)
+        } else if lower.contains("cian.ru") {
+            Some(Self::Cian)
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Display for Marketplace {

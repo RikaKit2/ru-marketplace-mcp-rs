@@ -3,6 +3,7 @@ pub mod marketplaces;
 pub mod mcp;
 pub mod prices;
 
+pub use crate::services::verification::{OfferVerificationResult, verify_offer};
 pub use errors::ScraperError;
 pub use marketplaces::{
     CardType, Currency, Marketplace, StockStatus, SubscriptionType, WafProtection,

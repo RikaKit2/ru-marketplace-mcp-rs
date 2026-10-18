@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use async_tungstenite::tungstenite::Message;
 use futures::StreamExt;
 use serde_json::{Value, json};
+use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -164,7 +165,133 @@ impl CdpClient {
 struct ActiveSession {
     cdp: CdpClient,
     tabs: HashMap<Marketplace, String>,
+    generic_tabs: HashMap<String, String>,
     last_used: std::time::Instant,
+}
+
+/// Errors produced by browser automation, CDP operations, and screenshot capture.
+#[derive(Debug, Error)]
+pub enum SolverError {
+    #[error("Scraper error: {0}")]
+    Scraper(#[from] ScraperError),
+
+    #[error("Page was blocked by anti-bot/WAF: {0}")]
+    Blocked(String),
+
+    #[error("Timeout waiting for page to reach ready stage: {0}")]
+    Timeout(String),
+
+    #[error("CDP command failed: {0}")]
+    CdpCommand(String),
+
+    #[error("Screenshot capture failed: {0}")]
+    CaptureFailed(String),
+
+    #[error("Base64 error: {0}")]
+    Base64(String),
+
+    #[error("Browser not available: {0}")]
+    BrowserUnavailable(String),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// Decode a base64 string into raw binary bytes.
+pub fn decode_base64(input: &str) -> Result<Vec<u8>, SolverError> {
+    fn decode_char(c: u8) -> Result<u8, SolverError> {
+        match c {
+            b'A'..=b'Z' => Ok(c - b'A'),
+            b'a'..=b'z' => Ok(c - b'a' + 26),
+            b'0'..=b'9' => Ok(c - b'0' + 52),
+            b'+' | b'-' => Ok(62),
+            b'/' | b'_' => Ok(63),
+            _ => Err(SolverError::Base64(format!(
+                "Invalid base64 character: {}",
+                c as char
+            ))),
+        }
+    }
+
+    let clean: Vec<u8> = input
+        .bytes()
+        .filter(|&b| !b.is_ascii_whitespace())
+        .collect();
+
+    if clean.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !clean.len().is_multiple_of(4) {
+        return Err(SolverError::Base64(format!(
+            "Invalid base64 length (not a multiple of 4): {}",
+            clean.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
+    for (i, chunk) in clean.as_chunks::<4>().0.iter().enumerate() {
+        let is_last = (i + 1) * 4 == clean.len();
+        let b0 = decode_char(chunk[0])?;
+        let b1 = decode_char(chunk[1])?;
+
+        if chunk[2] == b'=' {
+            if !is_last || chunk[3] != b'=' {
+                return Err(SolverError::Base64("Invalid padding in base64".to_string()));
+            }
+            out.push((b0 << 2) | (b1 >> 4));
+            break;
+        }
+
+        let b2 = decode_char(chunk[2])?;
+        out.push((b0 << 2) | (b1 >> 4));
+
+        if chunk[3] == b'=' {
+            if !is_last {
+                return Err(SolverError::Base64(
+                    "Invalid padding in base64: padding before final chunk".to_string(),
+                ));
+            }
+            out.push(((b1 & 0x0f) << 4) | (b2 >> 2));
+            break;
+        }
+
+        let b3 = decode_char(chunk[3])?;
+        out.push(((b1 & 0x0f) << 4) | (b2 >> 2));
+        out.push(((b2 & 0x03) << 6) | b3);
+    }
+
+    Ok(out)
+}
+
+/// Encode raw binary bytes into a standard base64 string.
+pub fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        match chunk.len() {
+            3 => {
+                out.push(TABLE[(chunk[0] >> 2) as usize] as char);
+                out.push(TABLE[(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4)) as usize] as char);
+                out.push(TABLE[(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6)) as usize] as char);
+                out.push(TABLE[(chunk[2] & 0x3f) as usize] as char);
+            }
+            2 => {
+                out.push(TABLE[(chunk[0] >> 2) as usize] as char);
+                out.push(TABLE[(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4)) as usize] as char);
+                out.push(TABLE[((chunk[1] & 0x0f) << 2) as usize] as char);
+                out.push('=');
+            }
+            1 => {
+                out.push(TABLE[(chunk[0] >> 2) as usize] as char);
+                out.push(TABLE[((chunk[0] & 0x03) << 4) as usize] as char);
+                out.push('=');
+                out.push('=');
+            }
+            _ => unreachable!(),
+        }
+    }
+    out
 }
 /// Stage of a web page being solved via Chromium DevTools Protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,6 +640,7 @@ impl NativeCdpSolver {
         *session_guard = Some(ActiveSession {
             cdp,
             tabs,
+            generic_tabs: HashMap::new(),
             last_used: std::time::Instant::now(),
         });
 
@@ -936,6 +1064,134 @@ impl NativeCdpSolver {
                 "Failed to extract document HTML from on-demand browser".to_string(),
             ))
         }
+    }
+
+    /// Capture a JPEG screenshot of a page via Chrome DevTools Protocol.
+    ///
+    /// Opens or reuses a tab for the specified `url`, waits for the page to reach
+    /// `PageStage::Ready`, and executes `Page.captureScreenshot` with format "jpeg"
+    /// and the specified `quality` (defaults to 75 if 0 is passed).
+    /// Returns binary bytes of the JPEG image.
+    pub async fn capture_screenshot(&self, url: &str, quality: u8) -> Result<Vec<u8>, SolverError> {
+        let quality = if quality == 0 { 75 } else { quality.min(100) };
+
+        // 1. Try persistent session
+        {
+            let mut session_guard = self.persistent_session.lock().await;
+            if let Some(session) = session_guard.as_mut() {
+                session.last_used = std::time::Instant::now();
+
+                let tab_session_id = if let Some(marketplace) = Marketplace::from_url(url) {
+                    match session.tabs.get(&marketplace) {
+                        Some(id) => id.clone(),
+                        None => {
+                            let new_id = session
+                                .cdp
+                                .create_and_attach_tab(url)
+                                .await
+                                .map_err(SolverError::Scraper)?;
+                            session.tabs.insert(marketplace, new_id.clone());
+                            new_id
+                        }
+                    }
+                } else {
+                    match session.generic_tabs.get(url) {
+                        Some(id) => id.clone(),
+                        None => {
+                            let new_id = session
+                                .cdp
+                                .create_and_attach_tab(url)
+                                .await
+                                .map_err(SolverError::Scraper)?;
+                            session.generic_tabs.insert(url.to_string(), new_id.clone());
+                            new_id
+                        }
+                    }
+                };
+
+                let _ = session
+                    .cdp
+                    .send_target_cmd(&tab_session_id, "Page.navigate", json!({ "url": url }))
+                    .await;
+
+                let stage = Self::wait_for_page_ready(&mut session.cdp, &tab_session_id)
+                    .await
+                    .map_err(SolverError::Scraper)?;
+                if stage == PageStage::Blocked {
+                    return Err(SolverError::Blocked(format!("Access denied on {url}")));
+                }
+
+                let res = session
+                    .cdp
+                    .send_target_cmd(
+                        &tab_session_id,
+                        "Page.captureScreenshot",
+                        json!({
+                            "format": "jpeg",
+                            "quality": quality,
+                        }),
+                    )
+                    .await
+                    .map_err(SolverError::Scraper)?;
+
+                if let Some(err) = res.get("error") {
+                    return Err(SolverError::CdpCommand(format!(
+                        "Page.captureScreenshot failed: {err}"
+                    )));
+                }
+
+                let b64_str = res["result"]["data"].as_str().ok_or_else(|| {
+                    SolverError::CaptureFailed(format!(
+                        "CDP captureScreenshot response missing result.data: {res}"
+                    ))
+                })?;
+
+                return decode_base64(b64_str);
+            }
+        }
+
+        // 2. Fallback: On-demand launch
+        let mut cdp = self.spawn_browser().await.map_err(SolverError::Scraper)?;
+        let tab_session_id = cdp
+            .create_and_attach_tab(url)
+            .await
+            .map_err(SolverError::Scraper)?;
+
+        let stage = Self::wait_for_page_ready(&mut cdp, &tab_session_id)
+            .await
+            .map_err(SolverError::Scraper)?;
+        if stage == PageStage::Blocked {
+            cdp.close().await;
+            return Err(SolverError::Blocked(format!("Access denied on {url}")));
+        }
+
+        let res = cdp
+            .send_target_cmd(
+                &tab_session_id,
+                "Page.captureScreenshot",
+                json!({
+                    "format": "jpeg",
+                    "quality": quality,
+                }),
+            )
+            .await
+            .map_err(SolverError::Scraper)?;
+
+        cdp.close().await;
+
+        if let Some(err) = res.get("error") {
+            return Err(SolverError::CdpCommand(format!(
+                "Page.captureScreenshot failed: {err}"
+            )));
+        }
+
+        let b64_str = res["result"]["data"].as_str().ok_or_else(|| {
+            SolverError::CaptureFailed(format!(
+                "CDP captureScreenshot response missing result.data: {res}"
+            ))
+        })?;
+
+        decode_base64(b64_str)
     }
 
     /// Harvest cookies for a marketplace domain.

@@ -8,8 +8,9 @@ pub use connector as connectors;
 pub use connector::MarketplaceConnector;
 pub use domain::{
     CardType, Currency, JsonRpcError, JsonRpcRequest, JsonRpcResponse, Marketplace, McpCallResult,
-    McpTextContent, McpTool, McpToolRequest, PriceTier, ProductOffer, ScraperError,
-    SearchFilterOptions, SortOrder, StockStatus, SubscriptionType, WafProtection, error_codes,
+    McpTextContent, McpTool, McpToolRequest, OfferVerificationResult, PriceTier, ProductOffer,
+    ScraperError, SearchFilterOptions, SortOrder, StockStatus, SubscriptionType, WafProtection,
+    error_codes, verify_offer,
 };
 pub use services::{AggregatorService, CompareResult, SourceOutcome};
 pub use session::{CookieStore, SessionData, SessionManager, SessionSolver, SessionStatusInfo};

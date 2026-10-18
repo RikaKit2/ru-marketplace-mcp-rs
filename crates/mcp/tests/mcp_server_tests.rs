@@ -60,14 +60,26 @@ async fn test_mcp_tools_list() {
         .map(|t| t.get("name").unwrap().as_str().unwrap())
         .collect();
 
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 22);
     assert!(tool_names.contains(&"compare_prices"));
     assert!(tool_names.contains(&"wb_search"));
-    assert!(tool_names.contains(&"ozon_search"));
-    assert!(tool_names.contains(&"dns_search"));
-    assert!(tool_names.contains(&"citilink_search"));
-    assert!(tool_names.contains(&"ozon_card"));
     assert!(tool_names.contains(&"wb_card"));
+    assert!(tool_names.contains(&"wb_cards_batch"));
+    assert!(tool_names.contains(&"wb_root_info"));
+    assert!(tool_names.contains(&"wb_reviews"));
+    assert!(tool_names.contains(&"wb_seller"));
+    assert!(tool_names.contains(&"ozon_search"));
+    assert!(tool_names.contains(&"ozon_card"));
+    assert!(tool_names.contains(&"ozon_reviews"));
+    assert!(tool_names.contains(&"yandex_search"));
+    assert!(tool_names.contains(&"yandex_card"));
+    assert!(tool_names.contains(&"dns_search"));
+    assert!(tool_names.contains(&"dns_card"));
+    assert!(tool_names.contains(&"citilink_search"));
+    assert!(tool_names.contains(&"citilink_card"));
+    assert!(tool_names.contains(&"compare_verify_offer"));
+    assert!(tool_names.contains(&"compare_browser_snapshot"));
+    assert!(tool_names.contains(&"compare_sources"));
     assert!(tool_names.contains(&"session_start"));
     assert!(tool_names.contains(&"session_stop"));
     assert!(tool_names.contains(&"session_status"));

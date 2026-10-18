@@ -12,6 +12,7 @@ ru-marketplace-ozon.workspace = true
 ru-marketplace-wb.workspace = true
 ru-marketplace-dns.workspace = true
 ru-marketplace-citilink.workspace = true
+ru-marketplace-yandex.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 futures.workspace = true

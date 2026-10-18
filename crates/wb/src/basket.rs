@@ -8,6 +8,45 @@ use ru_marketplace_core::domain::{
     Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus,
 };
 
+/// Predict the Wildberries CDN basket shard host for a volume index based on historical partition ranges.
+pub fn basket_host_for_vol(vol: u64) -> &'static str {
+    const TABLE: &[(u64, &str)] = &[
+        (143, "basket-01.wbbasket.ru"),
+        (287, "basket-02.wbbasket.ru"),
+        (431, "basket-03.wbbasket.ru"),
+        (719, "basket-04.wbbasket.ru"),
+        (1007, "basket-05.wbbasket.ru"),
+        (1061, "basket-06.wbbasket.ru"),
+        (1115, "basket-07.wbbasket.ru"),
+        (1169, "basket-08.wbbasket.ru"),
+        (1313, "basket-09.wbbasket.ru"),
+        (1601, "basket-10.wbbasket.ru"),
+        (1655, "basket-11.wbbasket.ru"),
+        (1919, "basket-12.wbbasket.ru"),
+        (2045, "basket-13.wbbasket.ru"),
+        (2189, "basket-14.wbbasket.ru"),
+        (2405, "basket-15.wbbasket.ru"),
+        (2621, "basket-16.wbbasket.ru"),
+        (2837, "basket-17.wbbasket.ru"),
+        (3053, "basket-18.wbbasket.ru"),
+        (3269, "basket-19.wbbasket.ru"),
+        (3485, "basket-20.wbbasket.ru"),
+        (3701, "basket-21.wbbasket.ru"),
+        (3917, "basket-22.wbbasket.ru"),
+        (4133, "basket-23.wbbasket.ru"),
+        (4349, "basket-24.wbbasket.ru"),
+        (4565, "basket-25.wbbasket.ru"),
+        (4781, "basket-26.wbbasket.ru"),
+        (4997, "basket-27.wbbasket.ru"),
+    ];
+    for &(upper, host) in TABLE {
+        if vol <= upper {
+            return host;
+        }
+    }
+    "basket-28.wbbasket.ru"
+}
+
 /// Dynamic Basket CDN host resolver with thread-safe caching and concurrent probing.
 #[derive(Debug, Clone)]
 pub struct BasketResolver {
@@ -35,6 +74,12 @@ impl BasketResolver {
             max_known_basket: Arc::new(AtomicU16::new(60)),
         }
     }
+
+    /// Access internal reqwest client.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     /// Calculate the volume partition index (nm / 100_000).
     pub fn calculate_vol(nm: u64) -> u64 {
         nm / 100_000
@@ -108,8 +153,26 @@ impl BasketResolver {
             return Ok(host);
         }
 
-        debug!("Basket host cache miss for vol {vol}. Probing basket hosts...");
         let probe_path = format!("/vol{vol}/part{part}/{nm}/info/ru/card.json");
+
+        // Fast-path: table-predicted basket shard
+        let candidate = basket_host_for_vol(vol);
+        let candidate_url = format!("https://{candidate}{probe_path}");
+        if let Ok(resp) = self
+            .client
+            .head(&candidate_url)
+            .timeout(std::time::Duration::from_millis(800))
+            .send()
+            .await
+            && resp.status() == reqwest::StatusCode::OK
+        {
+            debug!("Resolved basket host via static mapping for vol {vol} -> {candidate}");
+            let mut cache = self.cache.write().await;
+            cache.insert(vol, candidate.to_string());
+            return Ok(candidate.to_string());
+        }
+
+        debug!("Basket host cache miss for vol {vol}. Probing basket hosts...");
         let current_max = self.max_known_basket.load(Ordering::Relaxed);
 
         // Window 1: probe known range 1..=current_max

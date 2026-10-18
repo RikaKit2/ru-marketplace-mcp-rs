@@ -8,6 +8,7 @@ members = [
     "crates/wb",
     "crates/dns",
     "crates/citilink",
+    "crates/yandex",
     "crates/mcp",
 ]
 [workspace.package]
@@ -23,6 +24,7 @@ ru-marketplace-ozon = { path = "crates/ozon" }
 ru-marketplace-wb = { path = "crates/wb" }
 ru-marketplace-dns = { path = "crates/dns" }
 ru-marketplace-citilink = { path = "crates/citilink" }
+ru-marketplace-yandex = { path = "crates/yandex" }
 
 futures = "0.3.31"
 async-trait = "0.1.92"

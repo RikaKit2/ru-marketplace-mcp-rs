@@ -224,3 +224,114 @@ fn test_search_filter_options_serde() {
     let de: SearchFilterOptions = serde_json::from_str(&json).unwrap();
     assert_eq!(opts, de);
 }
+
+#[test]
+fn test_marketplace_from_url() {
+    assert_eq!(
+        Marketplace::from_url("https://www.wildberries.ru/catalog/123/detail.aspx"),
+        Some(Marketplace::Wildberries)
+    );
+    assert_eq!(
+        Marketplace::from_url("https://basket-01.wbbasket.ru/vol1/part1/123/info/ru/card.json"),
+        Some(Marketplace::Wildberries)
+    );
+    assert_eq!(
+        Marketplace::from_url("https://www.ozon.ru/product/456/"),
+        Some(Marketplace::Ozon)
+    );
+    assert_eq!(
+        Marketplace::from_url("https://market.yandex.ru/product--test/789"),
+        Some(Marketplace::YandexMarket)
+    );
+    assert_eq!(
+        Marketplace::from_url("https://www.dns-shop.ru/product/abc/"),
+        Some(Marketplace::Dns)
+    );
+    assert_eq!(
+        Marketplace::from_url("https://www.citilink.ru/product/xyz/"),
+        Some(Marketplace::Citilink)
+    );
+    assert_eq!(
+        Marketplace::from_url("https://unknown-shop.com/product/1"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn test_offer_verification_success_and_diff() {
+    use async_trait::async_trait;
+    use ru_marketplace_core::MarketplaceConnector;
+    use ru_marketplace_core::domain::{
+        Currency, Marketplace, PriceTier, ProductOffer, ScraperError, SearchFilterOptions,
+        StockStatus, verify_offer,
+    };
+
+    struct TestConnector {
+        card_to_return: Result<ProductOffer, String>,
+    }
+
+    #[async_trait]
+    impl MarketplaceConnector for TestConnector {
+        fn marketplace(&self) -> Marketplace {
+            Marketplace::Wildberries
+        }
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _filters: &SearchFilterOptions,
+        ) -> Result<Vec<ProductOffer>, ScraperError> {
+            Ok(vec![])
+        }
+        async fn get_card(&self, _item_id: &str) -> Result<ProductOffer, ScraperError> {
+            match &self.card_to_return {
+                Ok(card) => Ok(card.clone()),
+                Err(e) => Err(ScraperError::Parse(e.clone())),
+            }
+        }
+    }
+
+    let original = ProductOffer {
+        marketplace: Marketplace::Wildberries,
+        title: "Test Item".to_string(),
+        url: "https://www.wildberries.ru/catalog/123/detail.aspx".to_string(),
+        price_tier: PriceTier::Base(1000),
+        original_price: Some(1500),
+        currency: Currency::Rub,
+        rating: Some(4.8),
+        review_count: Some(100),
+        stock: StockStatus::InStock(10),
+        seller: Some("Official Store".to_string()),
+        product_id: Some("123".to_string()),
+    };
+
+    // Case 1: Exact match
+    let conn1 = TestConnector {
+        card_to_return: Ok(original.clone()),
+    };
+    let res1 = verify_offer(&conn1, &original).await.unwrap();
+    assert!(res1.matched);
+    assert_eq!(res1.price_diff, 0);
+    assert!(!res1.stock_status_changed);
+    assert_eq!(res1.current_price, 1000);
+    assert_eq!(res1.expected_price, 1000);
+
+    // Case 2: Price changed + Stock changed
+    let mut modified = original.clone();
+    modified.price_tier = PriceTier::Base(1200);
+    modified.stock = StockStatus::OutOfStock;
+    let conn2 = TestConnector {
+        card_to_return: Ok(modified),
+    };
+    let res2 = verify_offer(&conn2, &original).await.unwrap();
+    assert!(!res2.matched);
+    assert_eq!(res2.price_diff, 200);
+    assert!(res2.stock_status_changed);
+    assert_eq!(res2.current_price, 1200);
+    assert_eq!(res2.expected_price, 1000);
+    assert!(
+        res2.details
+            .contains("price changed from 1000 RUB to 1200 RUB")
+    );
+    assert!(res2.details.contains("stock status changed"));
+}

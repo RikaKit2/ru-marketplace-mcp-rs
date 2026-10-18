@@ -1621,6 +1621,7 @@ dependencies = [
  "ru-marketplace-ozon",
  "ru-marketplace-solver",
  "ru-marketplace-wb",
+ "ru-marketplace-yandex",
  "serde",
  "serde_json",
  "thiserror",
@@ -1665,6 +1666,22 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-wb"
+version = "0.2.3"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest",
+ "ru-marketplace-core",
+ "ru-marketplace-solver",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ru-marketplace-yandex"
 version = "0.2.3"
 dependencies = [
  "async-trait",

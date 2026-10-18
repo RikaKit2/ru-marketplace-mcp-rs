@@ -100,4 +100,12 @@ impl ProductOffer {
             None
         }
     }
+
+    /// Verify this offer against live marketplace data using a connector.
+    pub async fn verify(
+        &self,
+        connector: &dyn crate::connector::MarketplaceConnector,
+    ) -> Result<crate::services::OfferVerificationResult, crate::domain::ScraperError> {
+        crate::services::verify_offer(connector, self).await
+    }
 }
