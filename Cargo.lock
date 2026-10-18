@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-aliexpress"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-citilink"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-dns"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-mcp"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "clap",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-ozon"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-solver"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "async-tungstenite",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-taobao"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-wb"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "ru-marketplace-yandex"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "futures",

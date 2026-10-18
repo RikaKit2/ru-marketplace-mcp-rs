@@ -1,9 +1,8 @@
 use ru_marketplace_core::domain::{Currency, Marketplace, PriceTier, ScraperError, StockStatus};
 use ru_marketplace_wb::{
-    BasketResolver, WbCategoriesResponse, WbCategoryNode, WbCategoryProductsResponse, WbReviewItem,
-    WbReviewsResponse, WbRootInfo, WbSellerInfo, WildberriesConnector, basket_host_for_vol,
-    build_menu_node, decode_mojibake, find_menu_subtree, parse_categories, parse_products_json,
-    parse_reviews_json, parse_root_info_json, parse_seller_info_json,
+    BasketResolver, WbCategoryNode, WildberriesConnector, basket_host_for_vol, decode_mojibake,
+    find_menu_subtree, parse_categories, parse_products_json, parse_reviews_json,
+    parse_root_info_json, parse_seller_info_json,
 };
 
 #[test]

@@ -1,7 +1,6 @@
 use ru_marketplace_core::domain::{CardType, Currency, Marketplace, PriceTier, StockStatus};
 use ru_marketplace_ozon::{
-    OzonAspectItem, OzonReviewItem, OzonReviewScore, OzonReviewsResponse, extract_sku,
-    parse_card_json, parse_composer_json, parse_price_str, parse_reviews_json,
+    extract_sku, parse_card_json, parse_composer_json, parse_price_str, parse_reviews_json,
 };
 
 #[test]
@@ -269,7 +268,7 @@ fn test_ozon_parse_reviews_full() {
     assert_eq!(res.sort, "published_at_desc");
     assert_eq!(res.rating_score, Some(4.8));
     assert_eq!(res.reviews_count, Some(150));
-    assert_eq!(res.has_next, true);
+    assert!(res.has_next);
     assert_eq!(res.returned, 2);
     assert_eq!(res.own_reviews, 1);
 

@@ -1,10 +1,8 @@
 use ru_marketplace_aliexpress::{
-    AliExpressConnector, AliExpressProduct, card_url, extract_item_id, is_empty_shell, is_punish,
-    parse_card_page, parse_meta_description, parse_search_page, search_url,
+    AliExpressConnector, card_url, extract_item_id, is_empty_shell, is_punish, parse_card_page,
+    parse_meta_description, parse_search_page, search_url,
 };
-use ru_marketplace_core::domain::{
-    Currency, Marketplace, PriceTier, ProductOffer, SearchFilterOptions, SortOrder, StockStatus,
-};
+use ru_marketplace_core::domain::{Currency, Marketplace, PriceTier, ProductOffer, StockStatus};
 
 const SEARCH_GRID_HTML: &str = include_str!("fixtures/search_grid.html");
 const CARD_HTML: &str = include_str!("fixtures/card.html");
@@ -34,7 +32,7 @@ fn test_parse_search_grid_fixture() {
         realme
             .image_url
             .as_ref()
-            .map_or(false, |url| url.contains("ae-pic")),
+            .is_some_and(|url| url.contains("ae-pic")),
         "expected valid product image preview"
     );
 
@@ -125,7 +123,7 @@ fn test_parse_card_fixture() {
     assert!(
         card.description
             .as_ref()
-            .map_or(false, |d| d.contains("Realme Watch 5")),
+            .is_some_and(|d| d.contains("Realme Watch 5")),
         "description should contain product title"
     );
 
