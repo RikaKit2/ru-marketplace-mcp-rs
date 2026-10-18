@@ -105,11 +105,15 @@ impl MarketplaceConnector for OzonConnector {
                 .query(&[("url", &url_param)]);
             match apply_browser_fingerprint(req, Some(sess)).send().await {
                 Ok(resp) if resp.status().is_success() => {
+                    let status = resp.status();
                     let text = resp.text().await?;
                     if text.contains("challenge-platform") || text.contains("cf-turnstile") {
                         info!(
                             "Ozon challenge detected with cached cookies, falling back to Chromium solver tab..."
                         );
+                        self.session_manager
+                            .invalidate_if_rejected("ozon", status, &text)
+                            .await;
                         self.solver
                             .fetch_in_tab(Marketplace::Ozon, &full_url)
                             .await?
@@ -117,8 +121,19 @@ impl MarketplaceConnector for OzonConnector {
                         text
                     }
                 }
-                _ => {
+                Ok(resp) => {
                     info!("Ozon direct request failed, falling back to Chromium solver tab...");
+                    self.session_manager
+                        .invalidate_if_rejected("ozon", resp.status(), "")
+                        .await;
+                    self.solver
+                        .fetch_in_tab(Marketplace::Ozon, &full_url)
+                        .await?
+                }
+                Err(_) => {
+                    info!(
+                        "Ozon direct request network error, falling back to Chromium solver tab..."
+                    );
                     self.solver
                         .fetch_in_tab(Marketplace::Ozon, &full_url)
                         .await?
@@ -165,11 +180,15 @@ impl MarketplaceConnector for OzonConnector {
                 .query(&[("url", &url_param)]);
             match apply_browser_fingerprint(req, Some(sess)).send().await {
                 Ok(resp) if resp.status().is_success() => {
+                    let status = resp.status();
                     let text = resp.text().await?;
                     if text.contains("challenge-platform") || text.contains("cf-turnstile") {
                         info!(
                             "Ozon card challenge detected, falling back to Chromium solver tab..."
                         );
+                        self.session_manager
+                            .invalidate_if_rejected("ozon", status, &text)
+                            .await;
                         self.solver
                             .fetch_in_tab(Marketplace::Ozon, &full_url)
                             .await?
@@ -177,8 +196,17 @@ impl MarketplaceConnector for OzonConnector {
                         text
                     }
                 }
-                _ => {
+                Ok(resp) => {
                     info!("Ozon card request failed, falling back to Chromium solver tab...");
+                    self.session_manager
+                        .invalidate_if_rejected("ozon", resp.status(), "")
+                        .await;
+                    self.solver
+                        .fetch_in_tab(Marketplace::Ozon, &full_url)
+                        .await?
+                }
+                Err(_) => {
+                    info!("Ozon card network error, falling back to Chromium solver tab...");
                     self.solver
                         .fetch_in_tab(Marketplace::Ozon, &full_url)
                         .await?

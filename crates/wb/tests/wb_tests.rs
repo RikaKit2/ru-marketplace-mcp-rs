@@ -121,3 +121,9 @@ fn test_wildberries_connector_creation() {
     assert_eq!(connector.marketplace(), Marketplace::Wildberries);
     assert_eq!(std::sync::Arc::strong_count(connector.session_manager()), 1);
 }
+
+#[test]
+fn test_basket_resolver_adaptive_ceiling() {
+    let resolver = BasketResolver::default();
+    assert_eq!(resolver.max_known_basket(), 60);
+}

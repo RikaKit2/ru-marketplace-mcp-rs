@@ -241,7 +241,13 @@ impl MarketplaceConnector for DnsConnector {
         url.query_pairs_mut().append_pair("q", trimmed);
         let full_url = url.to_string();
 
-        let body = match self.client.get(&full_url).send().await {
+        let body = match ru_marketplace_core::transport::send_with_transient_retry(
+            2,
+            std::time::Duration::from_millis(300),
+            || self.client.get(&full_url).send(),
+        )
+        .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 let text = resp.text().await?;
                 if text.contains("qrator") || text.contains("qrator_js") {
@@ -283,7 +289,7 @@ impl MarketplaceConnector for DnsConnector {
                         .navigate_and_extract_html(Marketplace::Dns, &full_url)
                         .await?
                 } else {
-                    return Err(ScraperError::Network(e));
+                    return Err(e);
                 }
             }
         };

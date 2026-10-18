@@ -112,6 +112,33 @@ impl SessionManager {
         }
     }
 
+    /// Check if a response indicates that session tokens were rejected or challenged,
+    /// and if so, reactively invalidate the cached session to force a fresh harvest on next call.
+    pub async fn invalidate_if_rejected(
+        &self,
+        marketplace: &str,
+        status: reqwest::StatusCode,
+        body: &str,
+    ) {
+        let is_rejected = status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+            || status.as_u16() == 498
+            || body.contains("challenge-platform")
+            || body.contains("cf-turnstile")
+            || body.contains("qrator_js")
+            || body.contains("incidentId")
+            || body.contains("incident_id");
+
+        if is_rejected {
+            info!(
+                marketplace = %marketplace,
+                status = %status,
+                "Reactive session invalidation triggered due to rejected tokens/challenge"
+            );
+            self.invalidate(marketplace).await;
+        }
+    }
+
     /// Start session for target marketplace ("all", "ozon", "wb", etc.).
     pub async fn start_session(&self, target: &str) -> Result<String, ScraperError> {
         let target_lower = target.to_lowercase();

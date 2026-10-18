@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use ru_marketplace_core::domain::{
     Currency, Marketplace, PriceTier, ProductOffer, ScraperError, StockStatus,
@@ -12,6 +13,7 @@ use ru_marketplace_core::domain::{
 pub struct BasketResolver {
     client: reqwest::Client,
     cache: Arc<RwLock<HashMap<u64, String>>>,
+    max_known_basket: Arc<AtomicU16>,
 }
 
 impl Default for BasketResolver {
@@ -30,9 +32,9 @@ impl BasketResolver {
         Self {
             client,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            max_known_basket: Arc::new(AtomicU16::new(60)),
         }
     }
-
     /// Calculate the volume partition index (nm / 100_000).
     pub fn calculate_vol(nm: u64) -> u64 {
         nm / 100_000
@@ -41,6 +43,49 @@ impl BasketResolver {
     /// Calculate the part partition index (nm / 1_000).
     pub fn calculate_part(nm: u64) -> u64 {
         nm / 1_000
+    }
+
+    /// Get current maximum known basket shard ceiling.
+    pub fn max_known_basket(&self) -> u16 {
+        self.max_known_basket.load(Ordering::Relaxed)
+    }
+
+    /// Concurrently probe a window of basket hosts from start_idx to end_idx.
+    async fn probe_window(
+        client: &reqwest::Client,
+        start_idx: u16,
+        end_idx: u16,
+        probe_path: &str,
+    ) -> Option<(u16, String)> {
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for i in start_idx..=end_idx {
+            let host = format!("basket-{i:02}.wbbasket.ru");
+            let url = format!("https://{host}{probe_path}");
+            let cl = client.clone();
+
+            join_set.spawn(async move {
+                let res = cl
+                    .head(&url)
+                    .timeout(std::time::Duration::from_secs(4))
+                    .send()
+                    .await;
+
+                match res {
+                    Ok(resp) if resp.status() == reqwest::StatusCode::OK => Some((i, host)),
+                    _ => None,
+                }
+            });
+        }
+
+        while let Some(join_result) = join_set.join_next().await {
+            if let Ok(Some((idx, found_host))) = join_result {
+                join_set.abort_all();
+                return Some((idx, found_host));
+            }
+        }
+
+        None
     }
 
     /// Prepopulate or manually set a host for a volume (useful for unit tests and warmup).
@@ -65,45 +110,39 @@ impl BasketResolver {
 
         debug!("Basket host cache miss for vol {vol}. Probing basket hosts...");
         let probe_path = format!("/vol{vol}/part{part}/{nm}/info/ru/card.json");
+        let current_max = self.max_known_basket.load(Ordering::Relaxed);
 
-        let mut join_set = tokio::task::JoinSet::new();
-
-        for i in 1..=60 {
-            let host = format!("basket-{i:02}.wbbasket.ru");
-            let url = format!("https://{host}{probe_path}");
-            let client = self.client.clone();
-
-            join_set.spawn(async move {
-                let res = client
-                    .head(&url)
-                    .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await;
-
-                match res {
-                    Ok(resp) if resp.status() == reqwest::StatusCode::OK => Some(host),
-                    Ok(_) => None,
-                    Err(err) => {
-                        debug!("Probe error on {url}: {err}");
-                        None
-                    }
-                }
-            });
+        // Window 1: probe known range 1..=current_max
+        if let Some((found_idx, found_host)) =
+            Self::probe_window(&self.client, 1, current_max, &probe_path).await
+        {
+            debug!("Resolved basket host for vol {vol} -> {found_host} (index {found_idx})");
+            self.max_known_basket
+                .fetch_max(found_idx, Ordering::Relaxed);
+            let mut cache = self.cache.write().await;
+            cache.insert(vol, found_host.clone());
+            return Ok(found_host);
         }
 
-        while let Some(join_result) = join_set.join_next().await {
-            match join_result {
-                Ok(Some(found_host)) => {
-                    join_set.abort_all();
-                    debug!("Resolved basket host for vol {vol} -> {found_host}");
-                    let mut cache = self.cache.write().await;
-                    cache.insert(vol, found_host.clone());
-                    return Ok(found_host);
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    warn!("JoinSet task panicked or was aborted: {err}");
-                }
+        // Window 2: Adaptive expansion up to (current_max + 25) capped at 99
+        let expansion_end = (current_max + 25).min(99);
+        if expansion_end > current_max {
+            debug!(
+                "Probing adaptive expansion window {}..={} for vol {vol}...",
+                current_max + 1,
+                expansion_end
+            );
+            if let Some((found_idx, found_host)) =
+                Self::probe_window(&self.client, current_max + 1, expansion_end, &probe_path).await
+            {
+                debug!(
+                    "Resolved basket host via expansion for vol {vol} -> {found_host} (new max: {found_idx})"
+                );
+                self.max_known_basket
+                    .fetch_max(found_idx, Ordering::Relaxed);
+                let mut cache = self.cache.write().await;
+                cache.insert(vol, found_host.clone());
+                return Ok(found_host);
             }
         }
 
@@ -126,12 +165,12 @@ impl BasketResolver {
         let base = self.basket_base(nm).await?;
         let url = format!("{base}/ru/card.json");
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(ScraperError::Network)?;
+        let resp = ru_marketplace_core::transport::send_with_transient_retry(
+            2,
+            std::time::Duration::from_millis(300),
+            || self.client.get(&url).send(),
+        )
+        .await?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -165,7 +204,13 @@ impl BasketResolver {
 
         // Try to fetch price from price-history.json if present
         let price_url = format!("{base}/price-history.json");
-        let price_tier = if let Ok(resp) = self.client.get(&price_url).send().await
+        let price_tier = if let Ok(resp) =
+            ru_marketplace_core::transport::send_with_transient_retry(
+                1,
+                std::time::Duration::from_millis(200),
+                || self.client.get(&price_url).send(),
+            )
+            .await
             && resp.status().is_success()
             && let Ok(text) = resp.text().await
             && let Ok(arr) = serde_json::from_str::<serde_json::Value>(&text)

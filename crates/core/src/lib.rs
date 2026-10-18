@@ -15,5 +15,5 @@ pub use services::{AggregatorService, CompareResult, SourceOutcome};
 pub use session::{CookieStore, SessionData, SessionManager, SessionSolver, SessionStatusInfo};
 pub use transport::{
     ACCEPT_LANG_RU, DEFAULT_DESKTOP_UA, SEC_CH_UA, SEC_CH_UA_MOBILE, SEC_CH_UA_PLATFORM,
-    apply_browser_fingerprint, build_browser_headers,
+    apply_browser_fingerprint, build_browser_headers, send_with_transient_retry,
 };
